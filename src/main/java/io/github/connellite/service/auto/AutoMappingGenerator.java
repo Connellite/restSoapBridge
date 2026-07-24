@@ -57,7 +57,7 @@ public class AutoMappingGenerator {
 
         Map<String, String> request = new LinkedHashMap<>();
         for (String field : operation.inputFields()) {
-            if (isCollectionItemField(field)) {
+            if (isCollectionItemField(field) || isJaxbMapEntryField(field)) {
                 continue;
             }
             request.put(toRestJsonPath(field), toSoapJsonPath(operation.inputElement(), field));
@@ -66,15 +66,22 @@ public class AutoMappingGenerator {
 
         List<String> requestSchemaPaths = new ArrayList<>();
         for (String field : operation.inputFields()) {
+            if (isJaxbMapEntryField(field)) {
+                continue;
+            }
             requestSchemaPaths.add(toRestJsonPath(field));
         }
         mapping.setRequestSchemaPaths(requestSchemaPaths);
-        mapping.setRequestSchemaFields(toRestSchemaFields(operation.inputSchemaFields()));
+        mapping.setRequestSchemaFields(toRestSchemaFields(
+                operation.inputSchemaFields().stream()
+                        .filter(field -> !isJaxbMapEntryField(field.path()))
+                        .toList()
+        ));
 
         Map<String, String> response = new LinkedHashMap<>();
         String payloadWrapperField = payloadWrapperField(operation);
         for (String field : operation.outputFields()) {
-            if (isCollectionItemField(field)) {
+            if (isCollectionItemField(field) || isJaxbMapEntryField(field)) {
                 continue;
             }
             response.put(toSpelPath(field, payloadWrapperField), toRestJsonPath(field));
@@ -83,10 +90,17 @@ public class AutoMappingGenerator {
 
         List<String> responseSchemaPaths = new ArrayList<>();
         for (String field : operation.outputFields()) {
+            if (isJaxbMapEntryField(field)) {
+                continue;
+            }
             responseSchemaPaths.add(toRestJsonPath(field));
         }
         mapping.setResponseSchemaPaths(responseSchemaPaths);
-        mapping.setResponseSchemaFields(toRestSchemaFields(operation.outputSchemaFields()));
+        mapping.setResponseSchemaFields(toRestSchemaFields(
+                operation.outputSchemaFields().stream()
+                        .filter(field -> !isJaxbMapEntryField(field.path()))
+                        .toList()
+        ));
 
         return mapping;
     }
@@ -106,6 +120,17 @@ public class AutoMappingGenerator {
 
     private static boolean isCollectionItemField(String field) {
         return field.contains("[].");
+    }
+
+    /**
+     * Defense in depth: even if XSD indexing expands Map entry trees, never map SpEL to {@code .entry}.
+     */
+    private static boolean isJaxbMapEntryField(String field) {
+        return field.equals("entry")
+                || field.equals("entry[]")
+                || field.startsWith("entry.")
+                || field.startsWith("entry[].")
+                || field.matches(".*\\.entry(\\[\\])?(\\..*)?");
     }
 
     private static String toRestJsonPath(String field) {

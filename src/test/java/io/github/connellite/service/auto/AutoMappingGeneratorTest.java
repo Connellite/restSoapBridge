@@ -131,4 +131,47 @@ class AutoMappingGeneratorTest {
                 "#root.language", "$.return.language"
         ), mapping.getResponse());
     }
+
+    @Test
+    void generate_skipsJaxbMapEntrySpelPaths() throws Exception {
+        BridgeProperties properties = new BridgeProperties();
+        BridgeProperties.AutoMapping auto = new BridgeProperties.AutoMapping();
+        auto.setServicesUrl("http://localhost:8080/services/");
+        auto.setPathPrefix("api");
+        auto.setHttpMethod("POST");
+        properties.setAuto(auto);
+
+        WsdlServiceDiscovery discovery = mock(WsdlServiceDiscovery.class);
+        WsdlUrlCollector wsdlUrlCollector = mock(WsdlUrlCollector.class);
+        when(wsdlUrlCollector.wsdlUrls()).thenReturn(List.of());
+        when(discovery.discover(auto.getServicesUrl(), List.of())).thenReturn(List.of(
+                new DiscoveredSoapService(
+                        "CatalogService",
+                        "http://localhost:8080/services/CatalogService?wsdl",
+                        List.of(new WsdlOperationModel(
+                                "getItem",
+                                "getItem",
+                                List.of("token"),
+                                List.of(new SchemaField("token", "string", true, false)),
+                                "getItemResponse",
+                                List.of("return.uuid", "return.labels", "return.labels.entry[]", "return.labels.entry[].key"),
+                                List.of(
+                                        new SchemaField("return.uuid", "string", true, false),
+                                        new SchemaField("return.labels", "object", false, false),
+                                        new SchemaField("return.labels.entry[]", "object", false, true),
+                                        new SchemaField("return.labels.entry[].key", "string", false, false)
+                                )
+                        ))
+                )
+        ));
+
+        AutoMappingGenerator generator = new AutoMappingGenerator(properties, discovery, wsdlUrlCollector);
+
+        MappingDefinition mapping = generator.generate().get(0);
+
+        assertEquals(Map.of(
+                "#root.uuid", "$.return.uuid",
+                "#root.labels", "$.return.labels"
+        ), mapping.getResponse());
+    }
 }

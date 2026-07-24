@@ -218,6 +218,48 @@ class PathResolverTest {
         assertEquals("aGVsbG8=", body.get("attachment").get("content").asText());
     }
 
+    @Test
+    void readFromSoapResult_keepsSingletonCollectionWhenMappingRootPayload() {
+        List<MapEntry> files = List.of(new MapEntry("path", "name.jpg"));
+
+        Object value = PathResolver.readFromSoapResult(files, "#root");
+
+        assertEquals(files, value);
+    }
+
+    @Test
+    void readFromSoapResult_returnsNullWhenOptionalMapPropertyIsNull() {
+        LabeledItem item = new LabeledItem(null);
+
+        Object value = PathResolver.readFromSoapResult(item, "#root.labels.entry");
+
+        assertNull(value);
+    }
+
+    @Test
+    void readFromSoapResult_readsMapAsWholeObject() {
+        LabeledItem item = new LabeledItem(Map.of("en", "Root"));
+
+        Object value = PathResolver.readFromSoapResult(item, "#root.labels");
+
+        assertEquals(Map.of("en", "Root"), value);
+    }
+
+    private record MapEntry(String key, String value) {
+    }
+
+    private static final class LabeledItem {
+        private final Map<String, String> labels;
+
+        private LabeledItem(Map<String, String> labels) {
+            this.labels = labels;
+        }
+
+        public Map<String, String> getLabels() {
+            return labels;
+        }
+    }
+
     private static class FulltextConfig {
 
         private final boolean analyzeAbbreviations;

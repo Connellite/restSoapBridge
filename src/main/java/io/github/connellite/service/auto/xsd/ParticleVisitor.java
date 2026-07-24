@@ -126,6 +126,13 @@ public class ParticleVisitor {
         XmlSchemaComplexType complexType = ComplexTypeResolver.resolve(resolvedElement, schema);
 
         if (complexType != null) {
+            // JAXB Map<K,V> in XSD is sequence of repeating entry{key,value}.
+            // Java beans expose a real Map (no getEntry()), so expand entry[] into SpEL would 502.
+            if (!collection && isJaxbMapComplexType(complexType, schema)) {
+                fields.add(new SchemaField(path, "object", required, false));
+                return;
+            }
+
             String typeKey = complexType.getName() != null ? complexType.getName() : path;
             if (!visiting.add(typeKey)) {
                 fields.add(new SchemaField(collection ? path + "[]" : path, "object", required, collection));
@@ -154,6 +161,69 @@ public class ParticleVisitor {
     private boolean isRepeating(XmlSchemaElement element) {
         long maxOccurs = element.getMaxOccurs();
         return maxOccurs > 1;
+    }
+
+    /**
+     * Detects the JAXB/CXF representation of {@code Map} in XML Schema:
+     * a complex type whose only particle is a repeating {@code entry} with {@code key}/{@code value}.
+     */
+    private boolean isJaxbMapComplexType(XmlSchemaComplexType complexType, XmlSchema schema) {
+        XmlSchemaParticle particle = complexType.getParticle();
+        if (!(particle instanceof XmlSchemaSequence sequence) || sequence.getItems().size() != 1) {
+            return false;
+        }
+        XmlSchemaSequenceMember only = sequence.getItems().get(0);
+        if (!(only instanceof XmlSchemaElement entryElement)) {
+            return false;
+        }
+        XmlSchemaElement resolvedEntry = ComplexTypeResolver.resolveElementReference(entryElement);
+        String entryName = entryElement.getName() != null ? entryElement.getName() : resolvedEntry.getName();
+        if (!"entry".equals(entryName) || !isRepeating(entryElement)) {
+            return false;
+        }
+        XmlSchemaComplexType entryType = ComplexTypeResolver.resolve(resolvedEntry, schema);
+        if (entryType == null) {
+            return false;
+        }
+        boolean hasKey = false;
+        boolean hasValue = false;
+        List<XmlSchemaElement> children = sequenceElements(entryType.getParticle());
+        if (children.isEmpty()) {
+            return false;
+        }
+        for (XmlSchemaElement child : children) {
+            String childName = child.getName();
+            if (childName == null) {
+                XmlSchemaElement resolved = ComplexTypeResolver.resolveElementReference(child);
+                childName = resolved.getName();
+            }
+            if ("key".equals(childName)) {
+                hasKey = true;
+            } else if ("value".equals(childName)) {
+                hasValue = true;
+            } else {
+                return false;
+            }
+        }
+        return hasKey && hasValue;
+    }
+
+    private List<XmlSchemaElement> sequenceElements(XmlSchemaParticle particle) {
+        List<XmlSchemaElement> elements = new ArrayList<>();
+        if (particle instanceof XmlSchemaSequence sequence) {
+            for (XmlSchemaSequenceMember item : sequence.getItems()) {
+                if (item instanceof XmlSchemaElement element) {
+                    elements.add(element);
+                }
+            }
+        } else if (particle instanceof XmlSchemaAll all) {
+            for (XmlSchemaAllMember item : all.getItems()) {
+                if (item instanceof XmlSchemaElement element) {
+                    elements.add(element);
+                }
+            }
+        }
+        return elements;
     }
 
     private String xsdTypeName(XmlSchemaElement element) {

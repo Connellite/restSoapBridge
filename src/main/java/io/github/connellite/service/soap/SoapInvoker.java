@@ -15,9 +15,12 @@ import org.springframework.core.convert.ConversionService;
 import org.springframework.stereotype.Component;
 
 import java.lang.reflect.Array;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 @Slf4j
 @Component
@@ -96,7 +99,7 @@ public class SoapInvoker {
         for (MessagePartInfo part : operationInfo.getInput().getMessageParts()) {
             parameters.add(parameter(part));
         }
-        return parameters.stream().filter(parameter -> parameter != null).toList();
+        return parameters.stream().filter(Objects::nonNull).toList();
     }
 
     private ParameterDescriptor parameter(MessagePartInfo part) {
@@ -140,16 +143,94 @@ public class SoapInvoker {
         if (targetType.isInstance(value)) {
             return value;
         }
-        if (CONVERSION_SERVICE.canConvert(value.getClass(), targetType)) {
-            return CONVERSION_SERVICE.convert(value, targetType);
+        if (isBinaryArray(targetType)) {
+            return convertBinaryArgument(value, targetType);
         }
         if (value instanceof Map<?, ?> || value instanceof List<?>) {
+            if (isJaxbMapWrapper(targetType)) {
+                return convertToJaxbMapWrapper(value, targetType);
+            }
             return OBJECT_MAPPER.convertValue(value, targetType);
+        }
+        if (CONVERSION_SERVICE.canConvert(value.getClass(), targetType)) {
+            return CONVERSION_SERVICE.convert(value, targetType);
         }
         if (isSimpleType(targetType)) {
             return OBJECT_MAPPER.convertValue(value, targetType);
         }
         return value;
+    }
+
+    /**
+     * CXF/JAXB represents SOAP maps as a wrapper bean with repeating {@code entry} items.
+     * REST clients may send a JSON object, an entry array, or {@code {entry:[...]}}.
+     */
+    private static boolean isJaxbMapWrapper(Class<?> targetType) {
+        try {
+            Class<?> entryType = targetType.getMethod("getEntry").getReturnType();
+            return List.class.isAssignableFrom(entryType) || entryType.isArray();
+        } catch (NoSuchMethodException exception) {
+            return false;
+        }
+    }
+
+    private static Object convertToJaxbMapWrapper(Object value, Class<?> targetType) {
+        Map<String, Object> wrapper = new LinkedHashMap<>();
+        wrapper.put("entry", normalizeMapEntries(value));
+        return OBJECT_MAPPER.convertValue(wrapper, targetType);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> normalizeMapEntries(Object value) {
+        if (value instanceof List<?> list) {
+            List<Map<String, Object>> entries = new ArrayList<>();
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> map) {
+                    entries.add(toEntryMap((Map<String, Object>) map));
+                }
+            }
+            return entries;
+        }
+        if (value instanceof Map<?, ?> map) {
+            if (map.containsKey("entry")) {
+                return normalizeMapEntries(map.get("entry"));
+            }
+            List<Map<String, Object>> entries = new ArrayList<>();
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("key", entry.getKey() == null ? null : String.valueOf(entry.getKey()));
+                item.put("value", entry.getValue() == null ? null : String.valueOf(entry.getValue()));
+                entries.add(item);
+            }
+            return entries;
+        }
+        return List.of();
+    }
+
+    private static Map<String, Object> toEntryMap(Map<String, Object> source) {
+        Map<String, Object> entry = new LinkedHashMap<>();
+        entry.put("key", source.get("key"));
+        entry.put("value", source.get("value"));
+        return entry;
+    }
+
+    private static boolean isBinaryArray(Class<?> targetType) {
+        return targetType == byte[].class || targetType == Byte[].class;
+    }
+
+    private static Object convertBinaryArgument(Object value, Class<?> targetType) {
+        if (value instanceof String text) {
+            byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+            if (targetType == byte[].class) {
+                return bytes;
+            }
+            Byte[] boxed = new Byte[bytes.length];
+            for (int index = 0; index < bytes.length; index++) {
+                boxed[index] = bytes[index];
+            }
+            return boxed;
+        }
+        return OBJECT_MAPPER.convertValue(value, targetType);
     }
 
     private static List<?> convertRepeatingArgument(Object value, Class<?> targetType) {

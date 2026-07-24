@@ -28,7 +28,7 @@ public class SoapPathResolver {
         if (soapResult == null) {
             return null;
         }
-        Object root = unwrapSoapContainer(soapResult);
+        Object root = unwrapSoapContainer(soapResult, spelExpression);
         StandardEvaluationContext context = new StandardEvaluationContext(root);
         context.setRootObject(root);
         context.addPropertyAccessor(new MapAccessor());
@@ -36,23 +36,48 @@ public class SoapPathResolver {
         try {
             return SPEL.parseExpression(spelExpression).getValue(context);
         } catch (EvaluationException exception) {
+            // Optional nested fields (e.g. null Map) must not fail the whole REST response.
+            if (isMissingOptionalProperty(exception)) {
+                return null;
+            }
             throw new IllegalStateException(
                     "Cannot evaluate SpEL '" + spelExpression + "' on " + root.getClass().getName(),
                     exception);
         }
     }
 
-    private static Object unwrapSoapContainer(Object soapResult) {
+    private static boolean isMissingOptionalProperty(EvaluationException exception) {
+        String message = exception.getMessage();
+        return message != null && message.contains("cannot be found on null");
+    }
+
+    /**
+     * CXF occasionally wraps a scalar payload in a singleton array/list.
+     * Do not unwrap when the mapping wants the root payload itself ({@code #root}):
+     * a singleton {@code List} of map entries must stay an array in JSON.
+     */
+    private static Object unwrapSoapContainer(Object soapResult, String spelExpression) {
+        if (isRootPayloadExpression(spelExpression) && isArrayOrCollection(soapResult)) {
+            return soapResult;
+        }
         if (soapResult.getClass().isArray()) {
             int length = Array.getLength(soapResult);
             if (length == 1) {
-                return unwrapSoapContainer(Array.get(soapResult, 0));
+                return unwrapSoapContainer(Array.get(soapResult, 0), spelExpression);
             }
         }
         if (soapResult instanceof Collection<?> collection && collection.size() == 1) {
-            return unwrapSoapContainer(collection.iterator().next());
+            return unwrapSoapContainer(collection.iterator().next(), spelExpression);
         }
         return soapResult;
+    }
+
+    private static boolean isRootPayloadExpression(String spelExpression) {
+        return spelExpression != null && "#root".equals(spelExpression.trim());
+    }
+
+    private static boolean isArrayOrCollection(Object value) {
+        return value != null && (value.getClass().isArray() || value instanceof Collection<?>);
     }
 
     @SuppressWarnings("NullableProblems")

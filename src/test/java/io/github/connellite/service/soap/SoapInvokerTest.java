@@ -85,6 +85,43 @@ class SoapInvokerTest {
         assertEquals(entry, entries.get(0));
     }
 
+    @Test
+    void convertArgument_convertsEntryListToJaxbMapWrapper() {
+        Map<String, Object> first = new LinkedHashMap<>();
+        first.put("key", "msg");
+        first.put("value", "hello");
+
+        Object converted = SoapInvoker.convertArgument(List.of(first), JaxbMapParams.class);
+
+        JaxbMapParams params = assertInstanceOf(JaxbMapParams.class, converted);
+        assertEquals(1, params.getEntry().size());
+        assertEquals("msg", params.getEntry().get(0).getKey());
+        assertEquals("hello", params.getEntry().get(0).getValue());
+    }
+
+    @Test
+    void convertArgument_convertsPlainMapToJaxbMapWrapper() {
+        Object converted = SoapInvoker.convertArgument(Map.of("msg", "hello"), JaxbMapParams.class);
+
+        JaxbMapParams params = assertInstanceOf(JaxbMapParams.class, converted);
+        assertEquals(1, params.getEntry().size());
+        assertEquals("msg", params.getEntry().get(0).getKey());
+        assertEquals("hello", params.getEntry().get(0).getValue());
+    }
+
+    public static class JaxbMapParams {
+
+        private List<MapEntryStringString> entry;
+
+        public List<MapEntryStringString> getEntry() {
+            return entry;
+        }
+
+        public void setEntry(List<MapEntryStringString> entry) {
+            this.entry = entry;
+        }
+    }
+
     public static class SimpleQueryParams {
 
         private String query;

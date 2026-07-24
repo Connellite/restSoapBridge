@@ -79,6 +79,51 @@ class XsdFieldIndexTest {
         ), schemaFields.get("createOrder"));
     }
 
+    @Test
+    void readElementFields_collapsesJaxbMapEntryPatternToSingleObjectField() throws Exception {
+        Definition definition = definitionWithSchema("""
+                <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+                           targetNamespace="urn:test"
+                           xmlns:tns="urn:test"
+                           elementFormDefault="qualified">
+                  <xs:element name="getItemResponse" type="tns:GetItemResponse"/>
+                  <xs:complexType name="GetItemResponse">
+                    <xs:sequence>
+                      <xs:element name="return" type="tns:ItemDto" minOccurs="0"/>
+                    </xs:sequence>
+                  </xs:complexType>
+                  <xs:complexType name="ItemDto">
+                    <xs:sequence>
+                      <xs:element name="uuid" type="xs:string"/>
+                      <xs:element name="name" type="xs:string" minOccurs="0"/>
+                      <xs:element name="labels" minOccurs="0">
+                        <xs:complexType>
+                          <xs:sequence>
+                            <xs:element name="entry" maxOccurs="unbounded">
+                              <xs:complexType>
+                                <xs:sequence>
+                                  <xs:element name="key" type="xs:string" minOccurs="0"/>
+                                  <xs:element name="value" type="xs:string" minOccurs="0"/>
+                                </xs:sequence>
+                              </xs:complexType>
+                            </xs:element>
+                          </xs:sequence>
+                        </xs:complexType>
+                      </xs:element>
+                    </xs:sequence>
+                  </xs:complexType>
+                </xs:schema>
+                """);
+
+        Map<String, List<String>> fields = XsdFieldIndex.readElementFields(definition);
+
+        assertEquals(List.of(
+                "return.uuid",
+                "return.name",
+                "return.labels"
+        ), fields.get("getItemResponse"));
+    }
+
     private static Definition definitionWithSchema(String xsd) throws Exception {
         WSDLFactory factory = WSDLFactory.newInstance();
         Definition definition = factory.newDefinition();
