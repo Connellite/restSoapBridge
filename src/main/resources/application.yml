@@ -22,6 +22,26 @@ bridge:
     http-method: POST
     connect-timeout: 30s
     receive-timeout: 60s
+  validation:
+    enabled: true
+  client-pool:
+    maximum-size: 100
+    expire-after-access: 1h
+    # refresh-after-write: 6h
+  backend:
+    # basic-auth:
+    #   username: bridge
+    #   password: secret
+    # ws-security:
+    #   username: soap-user
+    #   password: secret
+    #   password-type: digest
+    forward-headers: []
+  correlation:
+    header-name: X-Correlation-Id
+    forward-to-backend: true
+    soap-header:
+      enabled: false
 
 springdoc:
   show-actuator: false
@@ -36,5 +56,7 @@ springdoc:
     enabled: true
 
 logging:
+  pattern:
+    level: "%5p [%X{correlationId:-}]"
   level:
     io.github.connellite: DEBUG

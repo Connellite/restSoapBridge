@@ -174,4 +174,41 @@ class AutoMappingGeneratorTest {
                 "#root.labels", "$.return.labels"
         ), mapping.getResponse());
     }
+
+    @Test
+    void generate_usesSpelIndexerForNonIdentifierXmlNames() throws Exception {
+        BridgeProperties properties = new BridgeProperties();
+        BridgeProperties.AutoMapping auto = new BridgeProperties.AutoMapping();
+        auto.setServicesUrl("http://localhost:8080/services/");
+        auto.setPathPrefix("api");
+        auto.setHttpMethod("POST");
+        properties.setAuto(auto);
+
+        WsdlServiceDiscovery discovery = mock(WsdlServiceDiscovery.class);
+        WsdlUrlCollector wsdlUrlCollector = mock(WsdlUrlCollector.class);
+        when(wsdlUrlCollector.wsdlUrls()).thenReturn(List.of());
+        when(discovery.discover(auto.getServicesUrl(), List.of())).thenReturn(List.of(
+                new DiscoveredSoapService(
+                        "ItemService",
+                        "http://localhost:8080/services/ItemService?wsdl",
+                        List.of(new WsdlOperationModel(
+                                "getItem",
+                                "getItem",
+                                List.of(),
+                                List.of(),
+                                "getItemResponse",
+                                List.of("return.item-id", "return.class", "return.owner.full-name"),
+                                List.of()
+                        ))
+                )
+        ));
+
+        MappingDefinition mapping = new AutoMappingGenerator(properties, discovery, wsdlUrlCollector).generate().get(0);
+
+        assertEquals(Map.of(
+                "#root['item-id']", "$.return.item-id",
+                "#root.class", "$.return.class",
+                "#root.owner['full-name']", "$.return.owner.full-name"
+        ), mapping.getResponse());
+    }
 }

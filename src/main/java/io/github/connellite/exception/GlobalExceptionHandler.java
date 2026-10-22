@@ -19,6 +19,18 @@ import org.zalando.problem.spring.web.advice.ProblemHandling;
 public class GlobalExceptionHandler implements ProblemHandling {
 
     @ExceptionHandler
+    public ResponseEntity<Problem> handleRequestValidation(RequestValidationException exception, NativeWebRequest request) {
+        log.debug("Rejected request body: {}", exception.getErrors());
+        Problem problem = Problem.builder()
+                .withTitle("Invalid request body")
+                .withStatus(Status.BAD_REQUEST)
+                .withDetail(exception.getMessage())
+                .with("errors", exception.getErrors())
+                .build();
+        return create(exception, problem, request);
+    }
+
+    @ExceptionHandler
     public ResponseEntity<Problem> handleSoapFault(SoapFaultException exception, NativeWebRequest request) {
         log.warn("SOAP fault: {} - {}", exception.getFaultName(), exception.getMessage());
         var builder = Problem.builder()

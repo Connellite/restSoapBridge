@@ -1,48 +1,69 @@
 package io.github.connellite.service.soap;
 
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.LoadingCache;
+import com.github.benmanes.caffeine.cache.RemovalCause;
 import io.github.connellite.config.BridgeProperties;
-import lombok.RequiredArgsConstructor;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.binder.cache.CaffeineCacheMetrics;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.cxf.endpoint.Client;
-import org.apache.cxf.jaxws.endpoint.dynamic.JaxWsDynamicClientFactory;
-import org.apache.cxf.transport.http.HTTPConduit;
-import org.apache.cxf.transports.http.configuration.HTTPClientPolicy;
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-
+/**
+ * Dynamic CXF clients, one per WSDL URL. Building a client downloads the WSDL and compiles JAXB classes,
+ * so clients are cached; idle ones are evicted and, optionally, rebuilt in the background to pick up WSDL changes.
+ */
 @Slf4j
 @Component
-@RequiredArgsConstructor
-public class SoapClientPool {
+public class SoapClientPool implements DisposableBean {
 
-    private final Map<String, Client> clients = new ConcurrentHashMap<>();
-    private final BridgeProperties bridgeProperties;
+    private final LoadingCache<String, Client> clients;
+
+    public SoapClientPool(
+            BridgeProperties bridgeProperties,
+            SoapClientFactory clientFactory,
+            ObjectProvider<MeterRegistry> meterRegistry
+    ) {
+        BridgeProperties.ClientPool pool = bridgeProperties.getClientPool();
+        Caffeine<Object, Object> builder = Caffeine.newBuilder()
+                .maximumSize(pool.getMaximumSize())
+                .recordStats();
+        if (pool.getExpireAfterAccess() != null) {
+            builder.expireAfterAccess(pool.getExpireAfterAccess());
+        }
+        if (pool.getRefreshAfterWrite() != null) {
+            builder.refreshAfterWrite(pool.getRefreshAfterWrite());
+        }
+        this.clients = builder
+                .<String, Client>removalListener(SoapClientPool::onRemoval)
+                .build(clientFactory::create);
+        meterRegistry.ifAvailable(registry -> CaffeineCacheMetrics.monitor(registry, clients, "soap.clients"));
+    }
 
     public Client getClient(String wsdlUrl) {
-        return clients.computeIfAbsent(wsdlUrl, this::createClient);
+        return clients.get(wsdlUrl);
     }
 
-    private Client createClient(String wsdlUrl) {
-        log.info("Creating dynamic SOAP client for WSDL: {}", wsdlUrl);
-        JaxWsDynamicClientFactory factory = JaxWsDynamicClientFactory.newInstance();
-        Client client = factory.createClient(wsdlUrl);
-        configureTimeouts(client);
-        return client;
+    @Override
+    public void destroy() {
+        clients.invalidateAll();
+        clients.cleanUp();
     }
 
-    private void configureTimeouts(Client client) {
-        if (!(client.getConduit() instanceof HTTPConduit conduit)) {
+    /**
+     * A client replaced by a background refresh may still serve in-flight calls, so it is left to GC;
+     * evicted or invalidated clients are destroyed to release their conduits.
+     */
+    private static void onRemoval(String wsdlUrl, Client client, RemovalCause cause) {
+        if (client == null) {
             return;
         }
-        BridgeProperties.AutoMapping auto = bridgeProperties.getAuto();
-        if (auto == null) {
-            return;
+        log.info("SOAP client for WSDL {} removed from pool ({})", wsdlUrl, cause);
+        if (cause != RemovalCause.REPLACED) {
+            client.destroy();
         }
-        HTTPClientPolicy policy = new HTTPClientPolicy();
-        policy.setConnectionTimeout(auto.getConnectTimeout().toMillis());
-        policy.setReceiveTimeout(auto.getReceiveTimeout().toMillis());
-        conduit.setClient(policy);
     }
 }

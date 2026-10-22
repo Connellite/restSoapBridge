@@ -6,23 +6,36 @@ import org.springframework.context.expression.MapAccessor;
 import org.springframework.expression.AccessException;
 import org.springframework.expression.EvaluationContext;
 import org.springframework.expression.EvaluationException;
+import org.springframework.expression.Expression;
 import org.springframework.expression.ExpressionParser;
 import org.springframework.expression.PropertyAccessor;
 import org.springframework.expression.TypedValue;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
+import org.springframework.expression.spel.support.ReflectivePropertyAccessor;
 import org.springframework.expression.spel.support.StandardEvaluationContext;
 import org.springframework.util.LinkedCaseInsensitiveMap;
 
 import java.lang.reflect.Array;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 @UtilityClass
 public class SoapPathResolver {
 
     private static final ExpressionParser SPEL = new SpelExpressionParser();
+    private static final Map<String, Expression> EXPRESSIONS = new ConcurrentHashMap<>();
+    // XML-name accessor first: JAXB "class" must resolve to the clazz field, not Object#getClass().
+    private static final List<PropertyAccessor> PROPERTY_ACCESSORS = List.of(
+            new XmlNamePropertyAccessor(),
+            new MapAccessor(),
+            new SyntheticSoapWrapperAccessor(),
+            new ReflectivePropertyAccessor()
+    );
 
     public static Object read(Object soapResult, String spelExpression) {
         if (soapResult == null) {
@@ -30,11 +43,9 @@ public class SoapPathResolver {
         }
         Object root = unwrapSoapContainer(soapResult, spelExpression);
         StandardEvaluationContext context = new StandardEvaluationContext(root);
-        context.setRootObject(root);
-        context.addPropertyAccessor(new MapAccessor());
-        context.addPropertyAccessor(new SyntheticSoapWrapperAccessor());
+        context.setPropertyAccessors(new ArrayList<>(PROPERTY_ACCESSORS));
         try {
-            return SPEL.parseExpression(spelExpression).getValue(context);
+            return EXPRESSIONS.computeIfAbsent(spelExpression, SPEL::parseExpression).getValue(context);
         } catch (EvaluationException exception) {
             // Optional nested fields (e.g. null Map) must not fail the whole REST response.
             if (isMissingOptionalProperty(exception)) {

@@ -1,0 +1,136 @@
+package io.github.connellite.service.validation;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.networknt.schema.JsonSchema;
+import com.networknt.schema.JsonSchemaFactory;
+import com.networknt.schema.SpecVersion;
+import com.networknt.schema.ValidationMessage;
+import io.github.connellite.config.BridgeProperties;
+import io.github.connellite.config.OpenApiExampleFactory;
+import io.github.connellite.exception.RequestValidationException;
+import io.github.connellite.model.MappingDefinition;
+import io.github.connellite.model.SchemaField;
+import io.swagger.v3.core.util.Json;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Component;
+
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * Validates REST request bodies against the same XSD-derived schema that is published in OpenAPI,
+ * so malformed input is rejected with 400 before a SOAP call is made.
+ */
+@Component
+@RequiredArgsConstructor
+public class RequestSchemaValidator {
+
+    private static final Map<String, String> STRING_ENCODED_SCALARS = Map.of(
+            "integer", "^\\s*[-+]?\\d+\\s*$",
+            "number", "^\\s*[-+]?(\\d+\\.?\\d*|\\.\\d+)([eE][-+]?\\d+)?\\s*$",
+            "boolean", "^\\s*(true|false|TRUE|FALSE|True|False)\\s*$"
+    );
+
+    private static final JsonSchemaFactory SCHEMA_FACTORY = JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V7);
+
+    private final BridgeProperties bridgeProperties;
+    private final Map<String, Optional<JsonSchema>> schemas = new ConcurrentHashMap<>();
+
+    public void validate(MappingDefinition mapping, JsonNode body) {
+        if (!bridgeProperties.getValidation().isEnabled()) {
+            return;
+        }
+        Optional<JsonSchema> schema = schemas.computeIfAbsent(
+                mapping.getMethod() + " " + mapping.getPath(),
+                ignored -> compile(mapping.getRequestSchemaFields()));
+        if (schema.isEmpty()) {
+            return;
+        }
+        Set<ValidationMessage> messages = schema.get().validate(body);
+        if (!messages.isEmpty()) {
+            throw new RequestValidationException(messages.stream()
+                    .map(ValidationMessage::getMessage)
+                    .sorted()
+                    .toList());
+        }
+    }
+
+    /**
+     * Without XSD field metadata there is no reliable type information, so such operations are not validated.
+     */
+    static Optional<JsonSchema> compile(List<SchemaField> requestFields) {
+        if (requestFields == null || requestFields.isEmpty()) {
+            return Optional.empty();
+        }
+        ObjectNode schema = Json.mapper().valueToTree(OpenApiExampleFactory.schemaWithXsdExamples(requestFields, List.of()));
+        toValidationSchema(schema);
+        return Optional.of(SCHEMA_FACTORY.getSchema(schema));
+    }
+
+    /**
+     * Turns an OpenAPI 3.0 schema into a JSON Schema draft-07 one:
+     * examples are dropped, {@code format} is not asserted (XSD date/time lexical forms are wider than RFC 3339),
+     * and optional properties also accept {@code null}, as JAXB does.
+     */
+    static void toValidationSchema(ObjectNode schema) {
+        schema.remove("example");
+        schema.remove("format");
+        allowStringEncodedScalar(schema);
+
+        JsonNode items = schema.get("items");
+        if (items instanceof ObjectNode itemsSchema) {
+            toValidationSchema(itemsSchema);
+        }
+
+        if (!(schema.get("properties") instanceof ObjectNode properties)) {
+            return;
+        }
+        Set<String> required = new HashSet<>();
+        if (schema.get("required") instanceof ArrayNode requiredNames) {
+            requiredNames.forEach(name -> required.add(name.asText()));
+        }
+        Iterator<Map.Entry<String, JsonNode>> fields = properties.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> field = fields.next();
+            if (!(field.getValue() instanceof ObjectNode property)) {
+                continue;
+            }
+            toValidationSchema(property);
+            if (!required.contains(field.getKey())) {
+                allowNull(property);
+            }
+        }
+    }
+
+    /**
+     * Clients may send numbers and booleans as strings ({@code "42"}, {@code "true"}); the SOAP invoker coerces them.
+     * Accept such strings when they look like the target type: {@code anyOf: [{type: integer}, {type: string, pattern}]}.
+     */
+    private static void allowStringEncodedScalar(ObjectNode schema) {
+        JsonNode type = schema.get("type");
+        String pattern = type != null && type.isTextual() ? STRING_ENCODED_SCALARS.get(type.asText()) : null;
+        if (pattern == null) {
+            return;
+        }
+        schema.remove("type");
+        ArrayNode anyOf = schema.putArray("anyOf");
+        anyOf.addObject().put("type", type.asText());
+        anyOf.addObject().put("type", "string").put("pattern", pattern);
+    }
+
+    private static void allowNull(ObjectNode property) {
+        JsonNode type = property.get("type");
+        if (type != null && type.isTextual()) {
+            property.putArray("type").add(type.asText()).add("null");
+        } else if (property.get("anyOf") instanceof ArrayNode anyOf) {
+            anyOf.addObject().put("type", "null");
+        }
+    }
+}

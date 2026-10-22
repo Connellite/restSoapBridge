@@ -1,49 +1,69 @@
 package io.github.connellite.service.soap;
 
-import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.connellite.config.BridgeProperties;
+import io.github.connellite.correlation.CorrelationId;
 import io.github.connellite.exception.SoapFaultException;
 import io.github.connellite.exception.TypeCoercionException;
 import io.github.connellite.mapper.path.SoapArgument;
+import io.github.connellite.mapper.path.SoapJsonMapper;
 import io.github.connellite.util.TypeCoercionUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.cxf.endpoint.Client;
+import org.apache.cxf.headers.Header;
+import org.apache.cxf.helpers.DOMUtils;
+import org.apache.cxf.message.Message;
 import org.apache.cxf.service.model.BindingOperationInfo;
 import org.apache.cxf.service.model.MessagePartInfo;
 import org.apache.ws.commons.schema.XmlSchemaElement;
 import org.springframework.boot.convert.ApplicationConversionService;
 import org.springframework.core.convert.ConversionService;
 import org.springframework.stereotype.Component;
+import org.w3c.dom.Element;
 
+import javax.xml.namespace.QName;
 import java.lang.reflect.Array;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.TreeMap;
 
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class SoapInvoker {
 
-    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper()
-            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
-            .configure(DeserializationFeature.ACCEPT_SINGLE_VALUE_AS_ARRAY, true);
+    private static final ObjectMapper OBJECT_MAPPER = SoapJsonMapper.instance();
 
     private static final ConversionService CONVERSION_SERVICE = ApplicationConversionService.getSharedInstance();
 
     private static final Object NOT_COERCED = new Object();
 
     private final SoapClientPool clientPool;
+    private final BridgeProperties bridgeProperties;
 
     public Object invoke(String wsdlUrl, String operation, List<SoapArgument> arguments) {
+        return invoke(wsdlUrl, operation, arguments, Map.of());
+    }
+
+    /**
+     * @param backendHeaders HTTP headers for the SOAP request, in addition to the correlation id
+     */
+    public Object invoke(String wsdlUrl, String operation, List<SoapArgument> arguments,
+                         Map<String, List<String>> backendHeaders) {
         Client client = clientPool.getClient(wsdlUrl);
         Object[] params = convertArguments(client, operation, arguments);
         log.debug("Invoking SOAP operation '{}' with {} parameter(s)", operation, params.length);
         try {
-            Object[] response = client.invoke(operation, params);
+            // Per-call request context: the pooled client is shared between threads.
+            Map<String, Object> invocationContext = new HashMap<>();
+            invocationContext.put(Client.REQUEST_CONTEXT,
+                    requestContext(client.getRequestContext(), backendHeaders, CorrelationId.current()));
+            Object[] response = client.invoke(invocableOperation(client, operation), params, invocationContext);
             if (response == null) {
                 return null;
             }
@@ -54,6 +74,48 @@ public class SoapInvoker {
         } catch (Exception exception) {
             throw SoapFaultException.from(exception);
         }
+    }
+
+    /**
+     * Same resolution as {@code Client#invoke(String, Object...)}: unwrapped (document/literal wrapped) when possible.
+     */
+    private BindingOperationInfo invocableOperation(Client client, String operation) {
+        BindingOperationInfo operationInfo = findOperation(client, operation);
+        if (operationInfo == null) {
+            throw new IllegalArgumentException("SOAP operation '" + operation + "' not found in "
+                    + client.getEndpoint().getEndpointInfo().getName());
+        }
+        return operationInfo.isUnwrappedCapable() ? operationInfo.getUnwrappedOperation() : operationInfo;
+    }
+
+    Map<String, Object> requestContext(Map<String, Object> defaults, Map<String, List<String>> backendHeaders,
+                                       String correlationId) {
+        Map<String, Object> context = new HashMap<>(defaults);
+        BridgeProperties.Correlation correlation = bridgeProperties.getCorrelation();
+
+        Map<String, List<String>> httpHeaders = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        httpHeaders.putAll(backendHeaders);
+        if (correlationId != null && correlation.isForwardToBackend()) {
+            httpHeaders.put(correlation.getHeaderName(), List.of(correlationId));
+        }
+        if (!httpHeaders.isEmpty()) {
+            context.put(Message.PROTOCOL_HEADERS, httpHeaders);
+        }
+
+        if (correlationId != null && correlation.getSoapHeader().isEnabled()) {
+            List<Header> soapHeaders = new ArrayList<>();
+            soapHeaders.add(correlationSoapHeader(correlation.getSoapHeader(), correlationId));
+            context.put(Header.HEADER_LIST, soapHeaders);
+        }
+        return context;
+    }
+
+    private static Header correlationSoapHeader(BridgeProperties.SoapHeader soapHeader, String correlationId) {
+        QName name = new QName(soapHeader.getNamespace(), soapHeader.getLocalName());
+        Element element = DOMUtils.createDocument().createElementNS(name.getNamespaceURI(), name.getLocalPart());
+        element.setTextContent(correlationId);
+        // No data binding: SoapOutInterceptor copies DOM header elements as is.
+        return new Header(name, element);
     }
 
     private Object[] convertArguments(Client client, String operation, List<SoapArgument> arguments) {

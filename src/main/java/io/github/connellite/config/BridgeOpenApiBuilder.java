@@ -17,6 +17,8 @@ import io.swagger.v3.oas.models.responses.ApiResponse;
 import io.swagger.v3.oas.models.responses.ApiResponses;
 import io.swagger.v3.oas.models.tags.Tag;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.info.BuildProperties;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -39,6 +41,7 @@ public class BridgeOpenApiBuilder {
     private static final Pattern INVALID_COMPONENT_KEY_CHARS = Pattern.compile("[^a-zA-Z0-9._-]");
 
     private final MappingRegistry mappingRegistry;
+    private final ObjectProvider<BuildProperties> buildProperties;
     private volatile OpenAPI cachedOpenApi;
 
     public OpenAPI build() {
@@ -95,12 +98,25 @@ public class BridgeOpenApiBuilder {
         return new OpenAPI()
                 .info(new Info()
                         .title("REST SOAP Bridge")
-                        .version("1.0")
+                        .version(apiVersion())
                         .description("REST facade over SOAP services. Mapping mode: auto. Endpoints: "
                                 + mappingRegistry.getMappings().size()))
                 .tags(tags)
                 .paths(paths)
                 .components(components);
+    }
+
+    /**
+     * Project version from {@code META-INF/build-info.properties} (spring-boot-maven-plugin {@code build-info}),
+     * falling back to the JAR manifest when the app runs without it, e.g. from an IDE.
+     */
+    private String apiVersion() {
+        BuildProperties build = buildProperties.getIfAvailable();
+        if (build != null && build.getVersion() != null) {
+            return build.getVersion();
+        }
+        String implementationVersion = BridgeOpenApiBuilder.class.getPackage().getImplementationVersion();
+        return implementationVersion != null ? implementationVersion : "unknown";
     }
 
     private RequestBody buildRequestBody(MappingDefinition mapping, String schemaName, ObjectSchema schema) {

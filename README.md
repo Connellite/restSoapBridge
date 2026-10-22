@@ -103,6 +103,83 @@ One endpoint is created per SOAP operation:
 
 Example: `POST /api/Auth/login`.
 
+### Request validation: `bridge.validation.*`
+
+Request bodies are validated against the JSON schema generated from XSD (the same one shown in Swagger)
+before the SOAP call. A mismatch returns `400` with an `errors` list:
+
+```json
+{"title":"Invalid request body","status":400,"errors":["$.customer: required property 'name' not found","$.customer.age: string found, [integer, null] expected"]}
+```
+
+Types and required fields are checked; optional fields may be `null`; `format` (date/time) is not enforced.
+Numbers and booleans may also be sent as strings (`"42"`, `"1.5"`, `"true"`): they are converted to the XSD type;
+a string that does not look like a number/boolean (`"abc"`) is rejected.
+Operations without XSD field metadata are not validated.
+
+| Property | Description | Default |
+|----------|-------------|---------|
+| `enabled` | Turn validation on/off | `true` |
+
+### Backend authentication and headers: `bridge.backend.*`
+
+```yaml
+bridge:
+  backend:
+    basic-auth:
+      username: bridge
+      password: ${BACKEND_PASSWORD}
+    ws-security:            # WS-Security UsernameToken in every SOAP request
+      username: soap-user
+      password: ${WSS_PASSWORD}
+      password-type: digest # text | digest | none
+      add-nonce: true
+      add-created: true
+    forward-headers:        # REST request headers copied to the SOAP HTTP request
+      - Authorization
+      - Accept-Language
+```
+
+Basic auth and WS-Security are independent and can be combined. Do not forward `Authorization`
+when `basic-auth` is set: both would write the same header.
+
+### Correlation id: `bridge.correlation.*`
+
+Every REST request gets a correlation id: taken from the `X-Correlation-Id` header (if it is a safe token of up to 128 characters)
+or generated as a UUID. The id is returned in the response header, put into the log MDC (`%X{correlationId}`,
+already part of the default log pattern) and sent to the SOAP backend.
+
+| Property | Description | Default |
+|----------|-------------|---------|
+| `header-name` | REST and backend HTTP header name | `X-Correlation-Id` |
+| `forward-to-backend` | Send the id to the backend as an HTTP header | `true` |
+| `soap-header.enabled` | Also add `<CorrelationId>` to the SOAP envelope header | `false` |
+| `soap-header.namespace` | Namespace of the SOAP header element | `urn:rest-soap-bridge` |
+| `soap-header.local-name` | Local name of the SOAP header element | `CorrelationId` |
+
+### SOAP client pool: `bridge.client-pool.*`
+
+Dynamic CXF clients (one per WSDL) are cached with Caffeine. Metrics are published as `cache.*{cache="soap.clients"}`.
+
+| Property | Description | Default |
+|----------|-------------|---------|
+| `maximum-size` | Maximum number of cached clients | `100` |
+| `expire-after-access` | Evict a client unused for this long (empty = never) | `1h` |
+| `refresh-after-write` | Rebuild a client in the background (re-reads WSDL) this long after creation (empty = never) | — |
+
+### JSON field names
+
+JSON fields use XSD names, not Java names: JAXB annotations are honoured, so `return`, `class` or `item-id`
+appear in JSON as in the WSDL. XSD dates are written in their lexical form (`2024-01-02T03:04:05+03:00`).
+
+### Version
+
+The OpenAPI `info.version` is the Maven project version (from `META-INF/build-info.properties`, also exposed at
+`/actuator/info`).
+
+> Switching between the `spring-2` and `spring-3` profiles requires `mvn clean`: incremental compilation does not
+> notice the changed preprocessor symbol.
+
 ---
 
 ## Environment variables

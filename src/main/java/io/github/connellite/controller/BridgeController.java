@@ -2,6 +2,7 @@ package io.github.connellite.controller;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import io.github.connellite.config.BridgeProperties;
 import io.github.connellite.model.MappingDefinition;
 import io.github.connellite.model.MappingRegistry;
 import io.github.connellite.service.BridgeService;
@@ -19,6 +20,11 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.util.UrlPathHelper;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
 @Hidden
 @RestController
 @RequiredArgsConstructor
@@ -26,6 +32,7 @@ public class BridgeController {
 
     private final MappingRegistry mappingRegistry;
     private final BridgeService bridgeService;
+    private final BridgeProperties bridgeProperties;
 
     public ResponseEntity<JsonNode> handle(HttpServletRequest request, @RequestBody(required = false) JsonNode body) throws Exception {
         if (mappingRegistry.getMappings().isEmpty()) {
@@ -44,7 +51,18 @@ public class BridgeController {
                 ));
 
         JsonNode requestBody = body != null ? body : JsonNodeFactory.instance.objectNode();
-        JsonNode responseBody = bridgeService.execute(mapping, requestBody);
+        JsonNode responseBody = bridgeService.execute(mapping, requestBody, backendHeaders(request));
         return ResponseEntity.ok(responseBody);
+    }
+
+    private Map<String, List<String>> backendHeaders(HttpServletRequest request) {
+        Map<String, List<String>> headers = new LinkedHashMap<>();
+        for (String name : bridgeProperties.getBackend().getForwardHeaders()) {
+            List<String> values = Collections.list(request.getHeaders(name));
+            if (!values.isEmpty()) {
+                headers.put(name, values);
+            }
+        }
+        return headers;
     }
 }

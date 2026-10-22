@@ -38,6 +38,8 @@
         <wsdl4j.version>1.6.3</wsdl4j.version>
         <xmlschema.version>2.3.1</xmlschema.version>
         <extralib.version>1.5.1</extralib.version>
+        <json-schema-validator.version>1.5.9</json-schema-validator.version>
+        <jackson.xmlbind.artifact>jackson-module-jaxb-annotations</jackson.xmlbind.artifact>
     </properties>
 
     <dependencies>
@@ -71,6 +73,19 @@
             <artifactId>json-path</artifactId>
         </dependency>
         <dependency>
+            <groupId>com.fasterxml.jackson.module</groupId>
+            <artifactId>${jackson.xmlbind.artifact}</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.networknt</groupId>
+            <artifactId>json-schema-validator</artifactId>
+            <version>${json-schema-validator.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
             <version>${lombok.version}</version>
@@ -89,6 +104,11 @@
         <dependency>
             <groupId>org.apache.cxf</groupId>
             <artifactId>cxf-rt-transports-http</artifactId>
+            <version>${cxf.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.cxf</groupId>
+            <artifactId>cxf-rt-ws-security</artifactId>
             <version>${cxf.version}</version>
         </dependency>
         <dependency>
@@ -120,6 +140,12 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
             <version>${spring.boot.compat.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.cxf</groupId>
+            <artifactId>cxf-rt-transports-http-jetty</artifactId>
+            <version>${cxf.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
@@ -201,6 +227,13 @@
                             <goal>repackage</goal>
                         </goals>
                     </execution>
+                    <execution>
+                        <!-- META-INF/build-info.properties: BuildProperties bean, OpenAPI version, /actuator/info -->
+                        <id>build-info</id>
+                        <goals>
+                            <goal>build-info</goal>
+                        </goals>
+                    </execution>
                 </executions>
                 <configuration>
                     <mainClass>io.github.connellite.RestSoapBridgeApplication</mainClass>
@@ -250,6 +283,7 @@
                 <springdoc.version>1.7.0</springdoc.version>
                 <springdoc.artifact>springdoc-openapi-ui</springdoc.artifact>
                 <problem-spring-web.version>0.27.0</problem-spring-web.version>
+                <jackson.xmlbind.artifact>jackson-module-jaxb-annotations</jackson.xmlbind.artifact>
             </properties>
             <dependencyManagement>
                 <dependencies>
@@ -274,6 +308,7 @@
                 <springdoc.version>2.8.6</springdoc.version>
                 <springdoc.artifact>springdoc-openapi-starter-webmvc-ui</springdoc.artifact>
                 <problem-spring-web.version>0.29.1</problem-spring-web.version>
+                <jackson.xmlbind.artifact>jackson-module-jakarta-xmlbind-annotations</jackson.xmlbind.artifact>
             </properties>
             <dependencyManagement>
                 <dependencies>

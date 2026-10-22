@@ -2,19 +2,13 @@ package io.github.connellite.mapper.path;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.module.SimpleModule;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-#if SPRING_BOOT_3
-import jakarta.activation.DataHandler;
-#else
-import javax.activation.DataHandler;
-#endif
 import lombok.experimental.UtilityClass;
 
 @UtilityClass
 public class JsonPathWriter {
 
-    private static final ObjectMapper OBJECT_MAPPER = createObjectMapper();
+    private static final ObjectMapper OBJECT_MAPPER = SoapJsonMapper.instance();
 
     public static void write(ObjectNode body, String jsonPath, Object value) {
         String relative = toRelativePath(jsonPath);
@@ -48,11 +42,5 @@ public class JsonPathWriter {
     static String stripArraySuffix(String segment) {
         int bracketIndex = segment.indexOf('[');
         return bracketIndex >= 0 ? segment.substring(0, bracketIndex) : segment;
-    }
-
-    private static ObjectMapper createObjectMapper() {
-        SimpleModule module = new SimpleModule();
-        module.addSerializer(DataHandler.class, new DataHandlerSerializer());
-        return new ObjectMapper().registerModule(module);
     }
 }

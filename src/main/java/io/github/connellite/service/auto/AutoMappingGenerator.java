@@ -15,11 +15,14 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class AutoMappingGenerator {
+
+    private static final Pattern SPEL_IDENTIFIER = Pattern.compile("[A-Za-z_$][A-Za-z0-9_$]*");
 
     private final BridgeProperties bridgeProperties;
     private final WsdlServiceDiscovery serviceDiscovery;
@@ -157,7 +160,23 @@ public class AutoMappingGenerator {
         if (spelField.isBlank()) {
             return "#root";
         }
-        return "#root." + spelField;
+        return "#root" + spelPropertyChain(spelField);
+    }
+
+    /**
+     * XSD names such as {@code my-field} are not SpEL identifiers; address them with the indexer
+     * ({@code ['my-field']}), which goes through the same property accessors.
+     */
+    private static String spelPropertyChain(String field) {
+        StringBuilder chain = new StringBuilder();
+        for (String segment : field.split("\\.")) {
+            if (SPEL_IDENTIFIER.matcher(segment).matches()) {
+                chain.append('.').append(segment);
+            } else {
+                chain.append("['").append(segment.replace("'", "''")).append("']");
+            }
+        }
+        return chain.toString();
     }
 
     private static String payloadWrapperField(WsdlOperationModel operation) {
