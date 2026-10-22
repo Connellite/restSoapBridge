@@ -93,6 +93,8 @@ logging:
 | `path-prefix` | REST path prefix | `/api` |
 | `http-method` | HTTP method for all generated endpoints | `POST` |
 
+`path-prefix` must not be `/`: generated endpoints would shadow Swagger UI and actuator.
+
 One endpoint is created per SOAP operation:
 
 ```text
@@ -113,6 +115,8 @@ Spring Boot maps properties to UPPER_SNAKE_CASE automatically:
 | `bridge.auto.services-url` | `BRIDGE_AUTO_SERVICES_URL` |
 | `bridge.auto.path-prefix` | `BRIDGE_AUTO_PATH_PREFIX` |
 | `bridge.auto.http-method` | `BRIDGE_AUTO_HTTP_METHOD` |
+| `bridge.auto.wsdl-url` | `BRIDGE_AUTO_WSDL_URL` |
+| `bridge.auto.wsdl-1-url`, `bridge.auto.wsdl-auth-url`, ... | `BRIDGE_AUTO_WSDL_1_URL`, `BRIDGE_AUTO_WSDL_AUTH_URL`, ... |
 
 Example:
 

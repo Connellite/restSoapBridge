@@ -15,20 +15,18 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
+import org.springframework.web.util.UrlPathHelper;
 
 @Hidden
 @RestController
 @RequiredArgsConstructor
-@RequestMapping("/api/**")
 public class BridgeController {
 
     private final MappingRegistry mappingRegistry;
     private final BridgeService bridgeService;
 
-    @RequestMapping
     public ResponseEntity<JsonNode> handle(HttpServletRequest request, @RequestBody(required = false) JsonNode body) throws Exception {
         if (mappingRegistry.getMappings().isEmpty()) {
             throw new ResponseStatusException(
@@ -37,7 +35,9 @@ public class BridgeController {
             );
         }
 
-        MappingDefinition mapping = mappingRegistry.find(request.getMethod(), request.getRequestURI())
+        // Mapping paths are relative to the application, so strip the servlet context path (WAR deployments).
+        String path = UrlPathHelper.defaultInstance.getPathWithinApplication(request);
+        MappingDefinition mapping = mappingRegistry.find(request.getMethod(), path)
                 .orElseThrow(() -> new ResponseStatusException(
                         HttpStatus.NOT_FOUND,
                         "No mapping for " + request.getMethod() + " " + request.getRequestURI()

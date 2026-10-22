@@ -3,7 +3,9 @@ package io.github.connellite.service.soap;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.connellite.exception.SoapFaultException;
+import io.github.connellite.exception.TypeCoercionException;
 import io.github.connellite.mapper.path.SoapArgument;
+import io.github.connellite.util.TypeCoercionUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.cxf.endpoint.Client;
@@ -15,7 +17,6 @@ import org.springframework.core.convert.ConversionService;
 import org.springframework.stereotype.Component;
 
 import java.lang.reflect.Array;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -32,6 +33,8 @@ public class SoapInvoker {
             .configure(DeserializationFeature.ACCEPT_SINGLE_VALUE_AS_ARRAY, true);
 
     private static final ConversionService CONVERSION_SERVICE = ApplicationConversionService.getSharedInstance();
+
+    private static final Object NOT_COERCED = new Object();
 
     private final SoapClientPool clientPool;
 
@@ -140,11 +143,13 @@ public class SoapInvoker {
         if (parameter.repeating()) {
             return convertRepeatingArgument(value, targetType);
         }
-        if (targetType.isInstance(value)) {
-            return value;
-        }
-        if (isBinaryArray(targetType)) {
-            return convertBinaryArgument(value, targetType);
+        return convertValue(value, targetType);
+    }
+
+    private static Object convertValue(Object value, Class<?> targetType) {
+        Object coerced = tryCoerce(value, targetType);
+        if (coerced != NOT_COERCED) {
+            return coerced;
         }
         if (value instanceof Map<?, ?> || value instanceof List<?>) {
             if (isJaxbMapWrapper(targetType)) {
@@ -155,10 +160,23 @@ public class SoapInvoker {
         if (CONVERSION_SERVICE.canConvert(value.getClass(), targetType)) {
             return CONVERSION_SERVICE.convert(value, targetType);
         }
-        if (isSimpleType(targetType)) {
+        if (isSimpleType(targetType) || isByteArray(targetType)) {
             return OBJECT_MAPPER.convertValue(value, targetType);
         }
         return value;
+    }
+
+    private static Object tryCoerce(Object value, Class<?> targetType) {
+        try {
+            Object coerced = TypeCoercionUtil.coerce(value, targetType);
+            return coerced == null ? NOT_COERCED : coerced;
+        } catch (TypeCoercionException exception) {
+            return NOT_COERCED;
+        }
+    }
+
+    private static boolean isByteArray(Class<?> targetType) {
+        return targetType == byte[].class || targetType == Byte[].class;
     }
 
     /**
@@ -214,25 +232,6 @@ public class SoapInvoker {
         return entry;
     }
 
-    private static boolean isBinaryArray(Class<?> targetType) {
-        return targetType == byte[].class || targetType == Byte[].class;
-    }
-
-    private static Object convertBinaryArgument(Object value, Class<?> targetType) {
-        if (value instanceof String text) {
-            byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
-            if (targetType == byte[].class) {
-                return bytes;
-            }
-            Byte[] boxed = new Byte[bytes.length];
-            for (int index = 0; index < bytes.length; index++) {
-                boxed[index] = bytes[index];
-            }
-            return boxed;
-        }
-        return OBJECT_MAPPER.convertValue(value, targetType);
-    }
-
     private static List<?> convertRepeatingArgument(Object value, Class<?> targetType) {
         Class<?> elementType = targetType.isArray()
                 ? targetType.getComponentType()
@@ -253,16 +252,10 @@ public class SoapInvoker {
     }
 
     private static Object convertListItem(Object value, Class<?> elementType) {
-        if (value == null || elementType == null || elementType == Object.class || elementType.isInstance(value)) {
+        if (value == null || elementType == null || elementType == Object.class) {
             return value;
         }
-        if (CONVERSION_SERVICE.canConvert(value.getClass(), elementType)) {
-            return CONVERSION_SERVICE.convert(value, elementType);
-        }
-        if (value instanceof Map<?, ?> || value instanceof List<?> || isSimpleType(elementType)) {
-            return OBJECT_MAPPER.convertValue(value, elementType);
-        }
-        return value;
+        return convertValue(value, elementType);
     }
 
     private static boolean isSimpleType(Class<?> targetType) {

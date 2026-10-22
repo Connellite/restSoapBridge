@@ -2,13 +2,18 @@ package io.github.connellite.service.soap;
 
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 class SoapInvokerTest {
 
@@ -107,6 +112,75 @@ class SoapInvokerTest {
         assertEquals(1, params.getEntry().size());
         assertEquals("msg", params.getEntry().get(0).getKey());
         assertEquals("hello", params.getEntry().get(0).getValue());
+    }
+
+    @Test
+    void convertArgument_convertsSupportedScalars() {
+        assertEquals(10, SoapInvoker.convertArgument("10", int.class));
+        assertEquals(10L, SoapInvoker.convertArgument("10", Long.class));
+        assertEquals(1.5d, SoapInvoker.convertArgument("1.5", Double.class));
+        assertEquals(true, SoapInvoker.convertArgument("true", Boolean.class));
+        assertEquals('A', SoapInvoker.convertArgument("A", Character.class));
+        assertEquals(SampleColor.RED, SoapInvoker.convertArgument("RED", SampleColor.class));
+        assertEquals(10L, SoapInvoker.convertArgument(10, Long.class));
+    }
+
+    @Test
+    void convertArgument_convertsUuidAndDuration() {
+        UUID id = UUID.fromString("6b1e3e4a-8f2a-4c3e-9d1b-2a3b4c5d6e7f");
+
+        assertEquals(id, SoapInvoker.convertArgument(id.toString(), UUID.class));
+        assertEquals(Duration.ofSeconds(1), SoapInvoker.convertArgument("PT1S", Duration.class));
+    }
+
+    @Test
+    void convertArgument_convertsStringToBinaryArrays() {
+        byte[] expected = "hi".getBytes(StandardCharsets.UTF_8);
+
+        assertArrayEquals(expected, assertInstanceOf(byte[].class, SoapInvoker.convertArgument("hi", byte[].class)));
+
+        Byte[] boxed = assertInstanceOf(Byte[].class, SoapInvoker.convertArgument("hi", Byte[].class));
+        assertEquals(expected.length, boxed.length);
+        for (int index = 0; index < expected.length; index++) {
+            assertEquals(expected[index], boxed[index]);
+        }
+    }
+
+    @Test
+    void convertArgument_convertsNumberListToByteArray() {
+        Object converted = SoapInvoker.convertArgument(List.of(1, 2), byte[].class);
+
+        assertArrayEquals(new byte[]{1, 2}, assertInstanceOf(byte[].class, converted));
+    }
+
+    @Test
+    void convertArgument_returnsNullAndAlreadyTypedValue() {
+        assertNull(SoapInvoker.convertArgument(null, Integer.class));
+
+        String text = "contract";
+        assertSame(text, SoapInvoker.convertArgument(text, String.class));
+
+        SimpleQueryParams params = new SimpleQueryParams();
+        assertSame(params, SoapInvoker.convertArgument(params, SimpleQueryParams.class));
+    }
+
+    @Test
+    void convertArgument_returnsOriginalStringWhenBeanHasNoConverter() {
+        String query = "contract";
+
+        assertSame(query, SoapInvoker.convertArgument(query, SimpleQueryParams.class));
+    }
+
+    @Test
+    void convertArgument_convertsRepeatingScalarElements() {
+        Object converted = SoapInvoker.convertArgument(List.of("1", "2"), Integer.class, true);
+
+        assertEquals(List.of(1, 2), converted);
+        assertEquals(List.of(7), SoapInvoker.convertArgument("7", Integer.class, true));
+    }
+
+    public enum SampleColor {
+        RED, BLUE
     }
 
     public static class JaxbMapParams {

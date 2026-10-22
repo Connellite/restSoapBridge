@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 import static io.github.connellite.config.OpenApiExampleFactory.exampleMap;
 import static io.github.connellite.config.OpenApiExampleFactory.extractBodyField;
@@ -34,6 +35,8 @@ import static io.github.connellite.config.OpenApiExampleFactory.schemaWithXsdExa
 @Component
 @RequiredArgsConstructor
 public class BridgeOpenApiBuilder {
+
+    private static final Pattern INVALID_COMPONENT_KEY_CHARS = Pattern.compile("[^a-zA-Z0-9._-]");
 
     private final MappingRegistry mappingRegistry;
     private volatile OpenAPI cachedOpenApi;
@@ -62,8 +65,8 @@ public class BridgeOpenApiBuilder {
             String service = mapping.getSoap().getService();
             tagNames.add(service);
 
-            String requestSchemaName = schemaName(mapping, "request");
-            String responseSchemaName = schemaName(mapping, "response");
+            String requestSchemaName = schemaName(mapping, "Request");
+            String responseSchemaName = schemaName(mapping, "Response");
             Iterable<String> requestPaths = schemaPaths(mapping.getRequestSchemaPaths(), mapping.getRequest().keySet());
             Iterable<String> responsePaths = schemaPaths(mapping.getResponseSchemaPaths(), mapping.getResponse().values());
             ObjectSchema requestSchema = schemaWithXsdExamples(mapping.getRequestSchemaFields(), requestPaths);
@@ -167,8 +170,12 @@ public class BridgeOpenApiBuilder {
         return explicitPaths != null && !explicitPaths.isEmpty() ? explicitPaths : fallbackPaths;
     }
 
-    private String schemaName(MappingDefinition mapping, String suffix) {
-        return mapping.getSoap().getService() + "_" + mapping.getSoap().getOperation() + " " + suffix;
+    /**
+     * OpenAPI component keys must match {@code ^[a-zA-Z0-9.\-_]+$}, otherwise code generators reject the spec.
+     */
+    static String schemaName(MappingDefinition mapping, String suffix) {
+        String raw = mapping.getSoap().getService() + "_" + mapping.getSoap().getOperation() + suffix;
+        return INVALID_COMPONENT_KEY_CHARS.matcher(raw).replaceAll("_");
     }
 
     private String buildOperationId(MappingDefinition mapping) {

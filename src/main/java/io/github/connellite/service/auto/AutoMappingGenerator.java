@@ -202,10 +202,6 @@ public class AutoMappingGenerator {
     }
 
     private String buildPath(String prefix, String serviceName, String operationName) {
-        String normalizedPrefix = prefix.endsWith("/") ? prefix.substring(0, prefix.length() - 1) : prefix;
-        if (!normalizedPrefix.startsWith("/")) {
-            normalizedPrefix = "/" + normalizedPrefix;
-        }
-        return normalizedPrefix + "/" + serviceName + "/" + operationName;
+        return BridgeProperties.normalizePathPrefix(prefix) + "/" + serviceName + "/" + operationName;
     }
 }
