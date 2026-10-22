@@ -3,6 +3,7 @@ package io.github.connellite.service.soap;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.connellite.config.BridgeProperties;
 import io.github.connellite.correlation.CorrelationId;
+import io.github.connellite.exception.RequestValidationException;
 import io.github.connellite.exception.SoapFaultException;
 import io.github.connellite.exception.TypeCoercionException;
 import io.github.connellite.mapper.path.SoapArgument;
@@ -18,8 +19,10 @@ import org.apache.cxf.service.model.BindingOperationInfo;
 import org.apache.cxf.service.model.MessagePartInfo;
 import org.apache.ws.commons.schema.XmlSchemaElement;
 import org.springframework.boot.convert.ApplicationConversionService;
+import org.springframework.core.NestedExceptionUtils;
 import org.springframework.core.convert.ConversionService;
 import org.springframework.stereotype.Component;
+import org.springframework.util.ClassUtils;
 import org.w3c.dom.Element;
 
 import javax.xml.namespace.QName;
@@ -118,15 +121,59 @@ public class SoapInvoker {
         return new Header(name, element);
     }
 
+    /**
+     * A value that cannot become the parameter type is a client error: report it as 400 here instead of
+     * letting CXF fail with a ClassCastException while building the wrapper (502).
+     */
     private Object[] convertArguments(Client client, String operation, List<SoapArgument> arguments) {
         List<ParameterDescriptor> parameters = parameters(client, operation, arguments.size());
         Object[] params = new Object[arguments.size()];
+        List<String> errors = new ArrayList<>();
         for (int index = 0; index < arguments.size(); index++) {
-            Object value = arguments.get(index).value();
+            SoapArgument argument = arguments.get(index);
             ParameterDescriptor parameter = index < parameters.size() ? parameters.get(index) : ParameterDescriptor.unknown();
-            params[index] = convertArgument(value, parameter);
+            try {
+                params[index] = convertArgument(argument.value(), parameter);
+            } catch (IllegalArgumentException exception) {
+                errors.add(conversionError(argument, parameter, NestedExceptionUtils.getMostSpecificCause(exception).getMessage()));
+                continue;
+            }
+            if (!isAcceptable(params[index], parameter)) {
+                errors.add(conversionError(argument, parameter, null));
+            }
+        }
+        if (!errors.isEmpty()) {
+            throw new RequestValidationException(errors);
         }
         return params;
+    }
+
+    private static boolean isAcceptable(Object converted, ParameterDescriptor parameter) {
+        // Repeating parameters are passed as List whatever the declared type is.
+        return converted == null || parameter.targetType() == null || parameter.repeating()
+                || ClassUtils.isAssignableValue(parameter.targetType(), converted);
+    }
+
+    private static String conversionError(SoapArgument argument, ParameterDescriptor parameter, String reason) {
+        String message = "$." + argument.name() + ": " + jsonType(argument.value())
+                + " cannot be converted to " + parameter.targetType().getSimpleName();
+        return reason != null ? message + " (" + reason + ")" : message;
+    }
+
+    private static String jsonType(Object value) {
+        if (value instanceof Map<?, ?>) {
+            return "object";
+        }
+        if (value instanceof List<?>) {
+            return "array";
+        }
+        if (value instanceof Number) {
+            return "number";
+        }
+        if (value instanceof Boolean) {
+            return "boolean";
+        }
+        return "string";
     }
 
     private List<ParameterDescriptor> parameters(Client client, String operation, int argumentCount) {
