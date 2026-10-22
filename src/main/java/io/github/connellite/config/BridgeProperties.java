@@ -36,6 +36,11 @@ public class BridgeProperties {
     @Setter
     public static class Validation {
         private boolean enabled = true;
+        /**
+         * Reject top-level request fields the operation does not have (e.g. {@code uuid} instead of {@code folderUuid}):
+         * otherwise they are silently ignored and the SOAP parameter stays null.
+         */
+        private boolean rejectUnknownFields = true;
     }
 
     /**

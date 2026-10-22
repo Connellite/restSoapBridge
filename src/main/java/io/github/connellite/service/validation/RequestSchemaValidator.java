@@ -17,6 +17,7 @@ import io.swagger.v3.core.util.Json;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -42,37 +43,56 @@ public class RequestSchemaValidator {
     private static final JsonSchemaFactory SCHEMA_FACTORY = JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V7);
 
     private final BridgeProperties bridgeProperties;
-    private final Map<String, Optional<JsonSchema>> schemas = new ConcurrentHashMap<>();
+    private final Map<String, Optional<CompiledSchema>> schemas = new ConcurrentHashMap<>();
 
     public void validate(MappingDefinition mapping, JsonNode body) {
-        if (!bridgeProperties.getValidation().isEnabled()) {
+        BridgeProperties.Validation validation = bridgeProperties.getValidation();
+        if (!validation.isEnabled()) {
             return;
         }
-        Optional<JsonSchema> schema = schemas.computeIfAbsent(
+        Optional<CompiledSchema> schema = schemas.computeIfAbsent(
                 mapping.getMethod() + " " + mapping.getPath(),
-                ignored -> compile(mapping.getRequestSchemaFields()));
+                ignored -> compile(mapping.getRequestSchemaFields(), validation.isRejectUnknownFields()));
         if (schema.isEmpty()) {
             return;
         }
-        Set<ValidationMessage> messages = schema.get().validate(body);
-        if (!messages.isEmpty()) {
-            throw new RequestValidationException(messages.stream()
-                    .map(ValidationMessage::getMessage)
-                    .sorted()
-                    .toList());
+        Set<ValidationMessage> messages = schema.get().schema().validate(body);
+        if (messages.isEmpty()) {
+            return;
         }
+        List<String> errors = new ArrayList<>(messages.stream().map(ValidationMessage::getMessage).sorted().toList());
+        if (messages.stream().anyMatch(message -> "additionalProperties".equals(message.getType()))) {
+            errors.add("$: allowed fields are " + schema.get().rootFields());
+        }
+        throw new RequestValidationException(errors);
+    }
+
+    static Optional<JsonSchema> compile(List<SchemaField> requestFields) {
+        return compile(requestFields, false).map(CompiledSchema::schema);
     }
 
     /**
      * Without XSD field metadata there is no reliable type information, so such operations are not validated.
+     * Unknown fields are rejected at the top level only: nested types may come from XSD constructs the field
+     * index does not expand (e.g. type extension), and a false 400 there would block valid requests.
      */
-    static Optional<JsonSchema> compile(List<SchemaField> requestFields) {
+    static Optional<CompiledSchema> compile(List<SchemaField> requestFields, boolean rejectUnknownFields) {
         if (requestFields == null || requestFields.isEmpty()) {
             return Optional.empty();
         }
         ObjectNode schema = Json.mapper().valueToTree(OpenApiExampleFactory.schemaWithXsdExamples(requestFields, List.of()));
         toValidationSchema(schema);
-        return Optional.of(SCHEMA_FACTORY.getSchema(schema));
+        List<String> rootFields = new ArrayList<>();
+        if (schema.get("properties") instanceof ObjectNode properties) {
+            properties.fieldNames().forEachRemaining(rootFields::add);
+        }
+        if (rejectUnknownFields) {
+            schema.put("additionalProperties", false);
+        }
+        return Optional.of(new CompiledSchema(SCHEMA_FACTORY.getSchema(schema), List.copyOf(rootFields)));
+    }
+
+    record CompiledSchema(JsonSchema schema, List<String> rootFields) {
     }
 
     /**

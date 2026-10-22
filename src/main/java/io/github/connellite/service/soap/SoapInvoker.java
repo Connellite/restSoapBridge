@@ -171,8 +171,8 @@ public class SoapInvoker {
      * non-null argument without a matching part, is a client error: 400 instead of a ClassCastException
      * inside CXF (502) or a value silently landing in the wrong slot.
      */
-    private Object[] convertArguments(BindingOperationInfo operationInfo, BindingOperationInfo invocable,
-                                      List<SoapArgument> arguments) {
+    static Object[] convertArguments(BindingOperationInfo operationInfo, BindingOperationInfo invocable,
+                                     List<SoapArgument> arguments) {
         List<MessagePartInfo> parts = invocable.getInput() != null ? invocable.getInput().getMessageParts() : List.of();
         List<SoapArgument> effectiveArguments = arguments;
         if (!operationInfo.isUnwrappedCapable() && parts.size() == 1 && !hasArgumentFor(arguments, parts.get(0))) {
@@ -315,7 +315,7 @@ public class SoapInvoker {
         return "string";
     }
 
-    private BindingOperationInfo findOperation(Client client, String operation) {
+    static BindingOperationInfo findOperation(Client client, String operation) {
         return client.getEndpoint().getEndpointInfo().getBinding().getOperations().stream()
                 .filter(bindingOperation -> operation.equals(bindingOperation.getName().getLocalPart()))
                 .findFirst()

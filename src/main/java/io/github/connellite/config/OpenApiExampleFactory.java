@@ -20,6 +20,10 @@ import java.util.Map;
 
 @UtilityClass
 public class OpenApiExampleFactory {
+
+    static final String MAP_DESCRIPTION = "Key/value map (JAXB java.util.Map) as a flat JSON object of strings, "
+            + "e.g. {\"STATUS\": \"OK\", \"msg\": \"hello\"}; responses never use {\"entry\": [...]}. "
+            + "Requests also accept [{\"key\": \"msg\", \"value\": \"hello\"}].";
     public static ObjectSchema schemaWithExamples(Iterable<String> bodyPaths) {
         Map<String, Object> example = exampleMap(bodyPaths);
         ObjectSchema schema = new ObjectSchema();
@@ -291,7 +295,7 @@ public class OpenApiExampleFactory {
                 case "datetime", "time" -> new StringSchema().format("date-time");
                 case "base64binary", "hexbinary" -> new StringSchema().format("byte");
                 case "object" -> new ObjectSchema();
-                case "map" -> new ObjectSchema().additionalProperties(new StringSchema());
+                case "map" -> new ObjectSchema().additionalProperties(new StringSchema()).description(MAP_DESCRIPTION);
                 default -> new StringSchema();
             };
         }

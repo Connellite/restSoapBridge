@@ -120,6 +120,7 @@ Operations without XSD field metadata are not validated.
 | Property | Description | Default |
 |----------|-------------|---------|
 | `enabled` | Turn validation on/off | `true` |
+| `reject-unknown-fields` | Reject top-level fields the operation does not have (`400` with `$: allowed fields are [...]`), e.g. `uuid` sent instead of `folderUuid` | `true` |
 
 ### Backend authentication and headers: `bridge.backend.*`
 
