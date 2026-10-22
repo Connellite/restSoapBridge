@@ -102,8 +102,10 @@ public class OpenApiExampleFactory {
             case "float", "double", "decimal" -> 1.23;
             case "date" -> LocalDate.now().toString();
             case "datetime", "time" -> LocalDateTime.now().toString();
-            // Complex value without indexed children, e.g. a JAXB Map (entry/key/value) or an empty type.
+            // Complex value without indexed children (empty or recursive type).
             case "object" -> new LinkedHashMap<String, Object>();
+            // JAXB Map (entry/key/value), sent as a plain JSON object.
+            case "map" -> new LinkedHashMap<String, Object>(Map.of("key", "value"));
             default -> "";
         };
     }
@@ -289,6 +291,7 @@ public class OpenApiExampleFactory {
                 case "datetime", "time" -> new StringSchema().format("date-time");
                 case "base64binary", "hexbinary" -> new StringSchema().format("byte");
                 case "object" -> new ObjectSchema();
+                case "map" -> new ObjectSchema().additionalProperties(new StringSchema());
                 default -> new StringSchema();
             };
         }

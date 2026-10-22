@@ -62,7 +62,7 @@ public class SoapJsonMapper {
         module.addSerializer(XMLGregorianCalendar.class, new XmlGregorianCalendarSerializer());
         module.addDeserializer(XMLGregorianCalendar.class, new XmlGregorianCalendarDeserializer());
         module.addSerializer(JAXBElement.class, new JaxbElementSerializer());
-        return mapper.registerModule(module);
+        return mapper.registerModule(module).registerModule(new JaxbMapModule());
     }
 
     /**

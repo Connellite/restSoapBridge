@@ -2,6 +2,7 @@ package io.github.connellite.service.validation;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.networknt.schema.JsonSchema;
 import com.networknt.schema.JsonSchemaFactory;
@@ -88,25 +89,64 @@ public class RequestSchemaValidator {
         if (items instanceof ObjectNode itemsSchema) {
             toValidationSchema(itemsSchema);
         }
+        if (schema.get("additionalProperties") instanceof ObjectNode mapValueSchema) {
+            toValidationSchema(mapValueSchema);
+            allowScalarMapValue(mapValueSchema);
+        }
 
-        if (!(schema.get("properties") instanceof ObjectNode properties)) {
+        if (schema.get("properties") instanceof ObjectNode properties) {
+            Set<String> required = new HashSet<>();
+            if (schema.get("required") instanceof ArrayNode requiredNames) {
+                requiredNames.forEach(name -> required.add(name.asText()));
+            }
+            Iterator<Map.Entry<String, JsonNode>> fields = properties.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> field = fields.next();
+                if (!(field.getValue() instanceof ObjectNode property)) {
+                    continue;
+                }
+                toValidationSchema(property);
+                if (!required.contains(field.getKey())) {
+                    allowNull(property);
+                }
+            }
+        }
+        allowKeyValueAlternative(schema);
+    }
+
+    /**
+     * JAXB maps and {@code List<entry>} accept both key/value shapes (see JaxbMaps): a map may come as
+     * {@code [{key, value}]}, an entry list as {@code {"name": "value"}}.
+     */
+    private static void allowKeyValueAlternative(ObjectNode schema) {
+        ObjectNode alternative;
+        if (schema.get("additionalProperties") instanceof ObjectNode && isType(schema, "object")) {
+            alternative = JsonNodeFactory.instance.objectNode().put("type", "array");
+            ObjectNode entry = alternative.putObject("items").put("type", "object");
+            entry.putArray("required").add("key");
+            entry.putObject("properties").putObject("key").put("type", "string");
+        } else if (isType(schema, "array") && schema.get("items") instanceof ObjectNode items && isEntrySchema(items)) {
+            alternative = JsonNodeFactory.instance.objectNode().put("type", "object");
+            alternative.putObject("additionalProperties").putArray("type")
+                    .add("string").add("number").add("boolean").add("null");
+        } else {
             return;
         }
-        Set<String> required = new HashSet<>();
-        if (schema.get("required") instanceof ArrayNode requiredNames) {
-            requiredNames.forEach(name -> required.add(name.asText()));
+        ObjectNode original = schema.deepCopy();
+        schema.removeAll();
+        schema.putArray("anyOf").add(original).add(alternative);
+    }
+
+    private static boolean isType(ObjectNode schema, String type) {
+        JsonNode actual = schema.get("type");
+        return actual != null && actual.isTextual() && type.equals(actual.asText());
+    }
+
+    private static boolean isEntrySchema(ObjectNode items) {
+        if (!(items.get("properties") instanceof ObjectNode properties) || properties.size() != 2) {
+            return false;
         }
-        Iterator<Map.Entry<String, JsonNode>> fields = properties.fields();
-        while (fields.hasNext()) {
-            Map.Entry<String, JsonNode> field = fields.next();
-            if (!(field.getValue() instanceof ObjectNode property)) {
-                continue;
-            }
-            toValidationSchema(property);
-            if (!required.contains(field.getKey())) {
-                allowNull(property);
-            }
-        }
+        return properties.has("key") && properties.has("value");
     }
 
     /**
@@ -123,6 +163,16 @@ public class RequestSchemaValidator {
         ArrayNode anyOf = schema.putArray("anyOf");
         anyOf.addObject().put("type", type.asText());
         anyOf.addObject().put("type", "string").put("pattern", pattern);
+    }
+
+    /**
+     * JAXB map values are strings in the schema, but numbers and booleans are converted with {@code String.valueOf}.
+     */
+    private static void allowScalarMapValue(ObjectNode valueSchema) {
+        JsonNode type = valueSchema.get("type");
+        if (type != null && type.isTextual() && "string".equals(type.asText())) {
+            valueSchema.putArray("type").add("string").add("number").add("boolean").add("null");
+        }
     }
 
     private static void allowNull(ObjectNode property) {

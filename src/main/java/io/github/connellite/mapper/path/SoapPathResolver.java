@@ -10,6 +10,8 @@ import org.springframework.expression.Expression;
 import org.springframework.expression.ExpressionParser;
 import org.springframework.expression.PropertyAccessor;
 import org.springframework.expression.TypedValue;
+import org.springframework.expression.spel.SpelEvaluationException;
+import org.springframework.expression.spel.SpelMessage;
 import org.springframework.expression.spel.standard.SpelExpressionParser;
 import org.springframework.expression.spel.support.ReflectivePropertyAccessor;
 import org.springframework.expression.spel.support.StandardEvaluationContext;
@@ -47,7 +49,8 @@ public class SoapPathResolver {
         try {
             return EXPRESSIONS.computeIfAbsent(spelExpression, SPEL::parseExpression).getValue(context);
         } catch (EvaluationException exception) {
-            // Optional nested fields (e.g. null Map) must not fail the whole REST response.
+            // A null intermediate (optional nested DTO or map) yields null for the leaf; a property that does not
+            // exist on a non-null object is a mapping error and must surface (502), not become a silent null.
             if (isMissingOptionalProperty(exception)) {
                 return null;
             }
@@ -58,8 +61,8 @@ public class SoapPathResolver {
     }
 
     private static boolean isMissingOptionalProperty(EvaluationException exception) {
-        String message = exception.getMessage();
-        return message != null && message.contains("cannot be found on null");
+        return exception instanceof SpelEvaluationException spelException
+                && spelException.getMessageCode() == SpelMessage.PROPERTY_OR_FIELD_NOT_READABLE_ON_NULL;
     }
 
     /**

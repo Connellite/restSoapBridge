@@ -137,10 +137,24 @@ public class AutoMappingGenerator {
     }
 
     private static String toRestJsonPath(String field) {
-        if (field.endsWith("[]")) {
-            return "$." + field.substring(0, field.length() - 2);
+        String path = field.endsWith("[]") ? field.substring(0, field.length() - 2) : field;
+        StringBuilder restPath = new StringBuilder("$");
+        for (String segment : path.split("\\.", -1)) {
+            restPath.append('.').append(restFieldName(segment));
         }
-        return "$." + field;
+        return restPath.toString();
+    }
+
+    /**
+     * CXF names some elements with a leading underscore ({@code _return} for {@code Map} results); REST exposes
+     * the plain name. SOAP paths keep the XSD name, and arguments are matched with the same normalization.
+     */
+    private static String restFieldName(String segment) {
+        int start = 0;
+        while (start < segment.length() - 1 && segment.charAt(start) == '_' && segment.charAt(start + 1) != '[') {
+            start++;
+        }
+        return segment.substring(start);
     }
 
     private static String toSoapJsonPath(String inputElement, String field) {

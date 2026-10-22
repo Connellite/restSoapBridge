@@ -6,9 +6,15 @@ import io.github.connellite.correlation.CorrelationId;
 import io.github.connellite.exception.RequestValidationException;
 import io.github.connellite.exception.SoapFaultException;
 import io.github.connellite.exception.TypeCoercionException;
+import io.github.connellite.mapper.path.JaxbMaps;
 import io.github.connellite.mapper.path.SoapArgument;
 import io.github.connellite.mapper.path.SoapJsonMapper;
 import io.github.connellite.util.TypeCoercionUtil;
+#if SPRING_BOOT_3
+import jakarta.xml.bind.annotation.XmlElement;
+#else
+import javax.xml.bind.annotation.XmlElement;
+#endif
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.cxf.endpoint.Client;
@@ -27,12 +33,14 @@ import org.w3c.dom.Element;
 
 import javax.xml.namespace.QName;
 import java.lang.reflect.Array;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.TreeMap;
 
 @Slf4j
@@ -59,19 +67,27 @@ public class SoapInvoker {
     public Object invoke(String wsdlUrl, String operation, List<SoapArgument> arguments,
                          Map<String, List<String>> backendHeaders) {
         Client client = clientPool.getClient(wsdlUrl);
-        Object[] params = convertArguments(client, operation, arguments);
-        log.debug("Invoking SOAP operation '{}' with {} parameter(s)", operation, params.length);
+        BindingOperationInfo operationInfo = findOperation(client, operation);
+        if (operationInfo == null) {
+            throw new IllegalArgumentException("SOAP operation '" + operation + "' not found in "
+                    + client.getEndpoint().getEndpointInfo().getName());
+        }
+        // Same resolution as Client#invoke(String, Object...): unwrapped (document/literal wrapped) when possible.
+        BindingOperationInfo invocable = operationInfo.isUnwrappedCapable()
+                ? operationInfo.getUnwrappedOperation()
+                : operationInfo;
+        Object[] params = convertArguments(operationInfo, invocable, arguments);
         try {
             // Per-call request context: the pooled client is shared between threads.
             Map<String, Object> invocationContext = new HashMap<>();
             invocationContext.put(Client.REQUEST_CONTEXT,
                     requestContext(client.getRequestContext(), backendHeaders, CorrelationId.current()));
-            Object[] response = client.invoke(invocableOperation(client, operation), params, invocationContext);
+            Object[] response = client.invoke(invocable, params, invocationContext);
             if (response == null) {
                 return null;
             }
             if (response.length == 1) {
-                return response[0];
+                return operationInfo.isUnwrappedCapable() ? response[0] : unwrapResponse(operation, operationInfo, response[0]);
             }
             return response;
         } catch (Exception exception) {
@@ -80,15 +96,43 @@ public class SoapInvoker {
     }
 
     /**
-     * Same resolution as {@code Client#invoke(String, Object...)}: unwrapped (document/literal wrapped) when possible.
+     * An operation CXF cannot unwrap returns the response element bean ({@code fooResponse{return}}) instead of
+     * its payload. Mapping generation strips such a single-child {@code <operation>Response} wrapper, so strip it
+     * here as well: response paths then see the same shape for wrapped and unwrapped operations.
      */
-    private BindingOperationInfo invocableOperation(Client client, String operation) {
-        BindingOperationInfo operationInfo = findOperation(client, operation);
-        if (operationInfo == null) {
-            throw new IllegalArgumentException("SOAP operation '" + operation + "' not found in "
-                    + client.getEndpoint().getEndpointInfo().getName());
+    static Object unwrapResponse(String operation, BindingOperationInfo operationInfo, Object response) {
+        if (response == null || operationInfo.getOutput() == null
+                || operationInfo.getOutput().getMessageParts().size() != 1) {
+            return response;
         }
-        return operationInfo.isUnwrappedCapable() ? operationInfo.getUnwrappedOperation() : operationInfo;
+        MessagePartInfo part = operationInfo.getOutput().getMessageParts().get(0);
+        String elementName = part.getConcreteName() != null ? part.getConcreteName().getLocalPart() : partName(part);
+        if (!elementName.equalsIgnoreCase(operation + "Response")) {
+            return response;
+        }
+        return singleFieldValue(response);
+    }
+
+    private static Object singleFieldValue(Object bean) {
+        if (bean.getClass().getName().startsWith("java.")) {
+            return bean;
+        }
+        List<Field> fields = new ArrayList<>();
+        for (Class<?> type = bean.getClass(); type != null && type != Object.class; type = type.getSuperclass()) {
+            for (Field field : type.getDeclaredFields()) {
+                if (!Modifier.isStatic(field.getModifiers()) && !field.isSynthetic()) {
+                    fields.add(field);
+                }
+            }
+        }
+        if (fields.size() != 1 || !fields.get(0).trySetAccessible()) {
+            return bean;
+        }
+        try {
+            return fields.get(0).get(bean);
+        } catch (IllegalAccessException exception) {
+            return bean;
+        }
     }
 
     Map<String, Object> requestContext(Map<String, Object> defaults, Map<String, List<String>> backendHeaders,
@@ -122,16 +166,35 @@ public class SoapInvoker {
     }
 
     /**
-     * A value that cannot become the parameter type is a client error: report it as 400 here instead of
-     * letting CXF fail with a ClassCastException while building the wrapper (502).
+     * Builds {@code Object[]} in CXF part order, taking each value by the part's element name
+     * (JSON order and XSD index order do not matter). A value that cannot become the part type, or a
+     * non-null argument without a matching part, is a client error: 400 instead of a ClassCastException
+     * inside CXF (502) or a value silently landing in the wrong slot.
      */
-    private Object[] convertArguments(Client client, String operation, List<SoapArgument> arguments) {
-        List<ParameterDescriptor> parameters = parameters(client, operation, arguments.size());
-        Object[] params = new Object[arguments.size()];
+    private Object[] convertArguments(BindingOperationInfo operationInfo, BindingOperationInfo invocable,
+                                      List<SoapArgument> arguments) {
+        List<MessagePartInfo> parts = invocable.getInput() != null ? invocable.getInput().getMessageParts() : List.of();
+        List<SoapArgument> effectiveArguments = arguments;
+        if (!operationInfo.isUnwrappedCapable() && parts.size() == 1 && !hasArgumentFor(arguments, parts.get(0))) {
+            // Request element CXF cannot unwrap: the single part is the request bean, built from all fields.
+            effectiveArguments = List.of(new SoapArgument(partName(parts.get(0)), argumentsAsMap(arguments)));
+        }
+
+        Map<String, SoapArgument> argumentsByName = new LinkedHashMap<>();
+        for (SoapArgument argument : effectiveArguments) {
+            argumentsByName.put(normalizeName(argument.name()), argument);
+        }
+        Class<?> requestWrapper = operationInfo.isUnwrappedCapable() ? requestWrapperClass(operationInfo) : null;
+
+        Object[] params = new Object[parts.size()];
         List<String> errors = new ArrayList<>();
-        for (int index = 0; index < arguments.size(); index++) {
-            SoapArgument argument = arguments.get(index);
-            ParameterDescriptor parameter = index < parameters.size() ? parameters.get(index) : ParameterDescriptor.unknown();
+        for (int index = 0; index < parts.size(); index++) {
+            MessagePartInfo part = parts.get(index);
+            SoapArgument argument = argumentsByName.remove(normalizeName(partName(part)));
+            if (argument == null) {
+                continue;
+            }
+            ParameterDescriptor parameter = parameter(part, requestWrapper);
             try {
                 params[index] = convertArgument(argument.value(), parameter);
             } catch (IllegalArgumentException exception) {
@@ -142,10 +205,86 @@ public class SoapInvoker {
                 errors.add(conversionError(argument, parameter, null));
             }
         }
+
+        // Mappings list every XSD field, so absent (null) extras are harmless; a sent value must find its part.
+        List<String> unknown = argumentsByName.values().stream()
+                .filter(argument -> argument.value() != null)
+                .map(SoapArgument::name)
+                .toList();
+        if (!unknown.isEmpty()) {
+            errors.add("Unknown parameter(s) " + unknown + " for SOAP operation '"
+                    + operationInfo.getName().getLocalPart() + "'; expected "
+                    + parts.stream().map(SoapInvoker::partName).toList());
+        }
         if (!errors.isEmpty()) {
             throw new RequestValidationException(errors);
         }
+        if (log.isDebugEnabled()) {
+            log.debug("Invoking SOAP operation '{}' with {}", operationInfo.getName().getLocalPart(), describe(parts, params));
+        }
         return params;
+    }
+
+    private static boolean hasArgumentFor(List<SoapArgument> arguments, MessagePartInfo part) {
+        String name = normalizeName(partName(part));
+        return arguments.stream().anyMatch(argument -> normalizeName(argument.name()).equals(name));
+    }
+
+    private static Map<String, Object> argumentsAsMap(List<SoapArgument> arguments) {
+        Map<String, Object> fields = new LinkedHashMap<>();
+        for (SoapArgument argument : arguments) {
+            fields.put(argument.name(), argument.value());
+        }
+        return fields;
+    }
+
+    static String partName(MessagePartInfo part) {
+        return part.getName().getLocalPart();
+    }
+
+    /**
+     * JAXB escapes XML names that are Java keywords with a leading underscore ({@code _return}).
+     */
+    static String normalizeName(String name) {
+        int start = 0;
+        while (start < name.length() - 1 && name.charAt(start) == '_') {
+            start++;
+        }
+        return name.substring(start);
+    }
+
+    /**
+     * Request wrapper bean of a document/literal wrapped operation; its fields carry the generic element types
+     * of repeating parts ({@code List<MapEntry> attrs}), which the unwrapped parts only expose as {@code List}.
+     */
+    private static Class<?> requestWrapperClass(BindingOperationInfo operationInfo) {
+        if (operationInfo.getInput() == null || operationInfo.getInput().getMessageParts().size() != 1) {
+            return null;
+        }
+        return operationInfo.getInput().getMessageParts().get(0).getTypeClass();
+    }
+
+    private static String describe(List<MessagePartInfo> parts, Object[] params) {
+        StringBuilder description = new StringBuilder("{");
+        for (int index = 0; index < parts.size(); index++) {
+            if (index > 0) {
+                description.append(", ");
+            }
+            Object value = params[index];
+            description.append(partName(parts.get(index))).append('=')
+                    .append(value == null ? "null" : value.getClass().getSimpleName() + ":" + abbreviate(value));
+        }
+        return description.append('}').toString();
+    }
+
+    private static String abbreviate(Object value) {
+        String text;
+        try {
+            text = OBJECT_MAPPER.writeValueAsString(value);
+        } catch (Exception exception) {
+            text = String.valueOf(value);
+        }
+        return text.length() > 300 ? text.substring(0, 300) + "..." : text;
     }
 
     private static boolean isAcceptable(Object converted, ParameterDescriptor parameter) {
@@ -176,26 +315,6 @@ public class SoapInvoker {
         return "string";
     }
 
-    private List<ParameterDescriptor> parameters(Client client, String operation, int argumentCount) {
-        BindingOperationInfo operationInfo = findOperation(client, operation);
-        if (operationInfo == null) {
-            return List.of();
-        }
-
-        if (operationInfo.isUnwrappedCapable()) {
-            List<ParameterDescriptor> unwrappedParameters = inputParameters(operationInfo.getUnwrappedOperation());
-            if (unwrappedParameters.size() == argumentCount) {
-                return unwrappedParameters;
-            }
-        }
-
-        List<ParameterDescriptor> wrappedParameters = inputParameters(operationInfo);
-        if (wrappedParameters.size() == argumentCount) {
-            return wrappedParameters;
-        }
-        return List.of();
-    }
-
     private BindingOperationInfo findOperation(Client client, String operation) {
         return client.getEndpoint().getEndpointInfo().getBinding().getOperations().stream()
                 .filter(bindingOperation -> operation.equals(bindingOperation.getName().getLocalPart()))
@@ -203,26 +322,36 @@ public class SoapInvoker {
                 .orElse(null);
     }
 
-    private List<ParameterDescriptor> inputParameters(BindingOperationInfo operationInfo) {
-        if (operationInfo == null || operationInfo.getInput() == null) {
-            return List.of();
-        }
-        List<ParameterDescriptor> parameters = new ArrayList<>();
-        for (MessagePartInfo part : operationInfo.getInput().getMessageParts()) {
-            parameters.add(parameter(part));
-        }
-        return parameters.stream().filter(Objects::nonNull).toList();
-    }
-
-    private ParameterDescriptor parameter(MessagePartInfo part) {
+    private static ParameterDescriptor parameter(MessagePartInfo part, Class<?> requestWrapper) {
         Class<?> targetType = part.getTypeClass();
         if (targetType == null) {
-            return null;
+            return ParameterDescriptor.unknown();
         }
-        return new ParameterDescriptor(targetType, isRepeating(part, targetType));
+        boolean repeating = isRepeating(part, targetType);
+        Class<?> elementType = repeating && !targetType.isArray() && Collection.class.isAssignableFrom(targetType)
+                ? wrapperFieldElementType(requestWrapper, partName(part))
+                : null;
+        return new ParameterDescriptor(targetType, repeating, elementType);
     }
 
-    private boolean isRepeating(MessagePartInfo part, Class<?> targetType) {
+    private static Class<?> wrapperFieldElementType(Class<?> requestWrapper, String partName) {
+        for (Class<?> type = requestWrapper; type != null && type != Object.class; type = type.getSuperclass()) {
+            for (Field field : type.getDeclaredFields()) {
+                if (normalizeName(field.getName()).equals(normalizeName(partName))
+                        || partName.equals(xmlElementName(field))) {
+                    return JaxbMaps.listElementType(field.getGenericType());
+                }
+            }
+        }
+        return null;
+    }
+
+    private static String xmlElementName(Field field) {
+        XmlElement element = field.getAnnotation(XmlElement.class);
+        return element != null ? element.name() : null;
+    }
+
+    private static boolean isRepeating(MessagePartInfo part, Class<?> targetType) {
         if (part.getXmlSchema() instanceof XmlSchemaElement element && element.getMaxOccurs() > 1) {
             return true;
         }
@@ -250,7 +379,7 @@ public class SoapInvoker {
             return value;
         }
         if (parameter.repeating()) {
-            return convertRepeatingArgument(value, targetType);
+            return convertRepeatingArgument(value, targetType, parameter.elementType());
         }
         return convertValue(value, targetType);
     }
@@ -261,9 +390,7 @@ public class SoapInvoker {
             return coerced;
         }
         if (value instanceof Map<?, ?> || value instanceof List<?>) {
-            if (isJaxbMapWrapper(targetType)) {
-                return convertToJaxbMapWrapper(value, targetType);
-            }
+            // JAXB map wrappers and entry lists are reshaped by JaxbMapModule, at any depth.
             return OBJECT_MAPPER.convertValue(value, targetType);
         }
         if (CONVERSION_SERVICE.canConvert(value.getClass(), targetType)) {
@@ -288,63 +415,16 @@ public class SoapInvoker {
         return targetType == byte[].class || targetType == Byte[].class;
     }
 
-    /**
-     * CXF/JAXB represents SOAP maps as a wrapper bean with repeating {@code entry} items.
-     * REST clients may send a JSON object, an entry array, or {@code {entry:[...]}}.
-     */
-    private static boolean isJaxbMapWrapper(Class<?> targetType) {
-        try {
-            Class<?> entryType = targetType.getMethod("getEntry").getReturnType();
-            return List.class.isAssignableFrom(entryType) || entryType.isArray();
-        } catch (NoSuchMethodException exception) {
-            return false;
-        }
-    }
-
-    private static Object convertToJaxbMapWrapper(Object value, Class<?> targetType) {
-        Map<String, Object> wrapper = new LinkedHashMap<>();
-        wrapper.put("entry", normalizeMapEntries(value));
-        return OBJECT_MAPPER.convertValue(wrapper, targetType);
-    }
-
-    @SuppressWarnings("unchecked")
-    private static List<Map<String, Object>> normalizeMapEntries(Object value) {
-        if (value instanceof List<?> list) {
-            List<Map<String, Object>> entries = new ArrayList<>();
-            for (Object item : list) {
-                if (item instanceof Map<?, ?> map) {
-                    entries.add(toEntryMap((Map<String, Object>) map));
-                }
-            }
-            return entries;
-        }
-        if (value instanceof Map<?, ?> map) {
-            if (map.containsKey("entry")) {
-                return normalizeMapEntries(map.get("entry"));
-            }
-            List<Map<String, Object>> entries = new ArrayList<>();
-            for (Map.Entry<?, ?> entry : map.entrySet()) {
-                Map<String, Object> item = new LinkedHashMap<>();
-                item.put("key", entry.getKey() == null ? null : String.valueOf(entry.getKey()));
-                item.put("value", entry.getValue() == null ? null : String.valueOf(entry.getValue()));
-                entries.add(item);
-            }
-            return entries;
-        }
-        return List.of();
-    }
-
-    private static Map<String, Object> toEntryMap(Map<String, Object> source) {
-        Map<String, Object> entry = new LinkedHashMap<>();
-        entry.put("key", source.get("key"));
-        entry.put("value", source.get("value"));
-        return entry;
-    }
-
-    private static List<?> convertRepeatingArgument(Object value, Class<?> targetType) {
-        Class<?> elementType = targetType.isArray()
+    private static List<?> convertRepeatingArgument(Object value, Class<?> targetType, Class<?> knownElementType) {
+        Class<?> elementType = knownElementType != null
+                ? knownElementType
+                : targetType.isArray()
                 ? targetType.getComponentType()
                 : (List.class.isAssignableFrom(targetType) ? Object.class : targetType);
+        if (value instanceof Map<?, ?> map && JaxbMaps.isEntryType(elementType) && !JaxbMaps.isEntryShaped(map)) {
+            // attrs: {"a": "1"} for List<MapEntry>
+            value = JaxbMaps.toEntries(map);
+        }
         if (value instanceof List<?> values) {
             return values.stream()
                     .map(item -> convertListItem(item, elementType))
@@ -376,7 +456,11 @@ public class SoapInvoker {
                 || Enum.class.isAssignableFrom(targetType);
     }
 
-    private record ParameterDescriptor(Class<?> targetType, boolean repeating) {
+    private record ParameterDescriptor(Class<?> targetType, boolean repeating, Class<?> elementType) {
+
+        private ParameterDescriptor(Class<?> targetType, boolean repeating) {
+            this(targetType, repeating, null);
+        }
 
         private static ParameterDescriptor unknown() {
             return new ParameterDescriptor(null, false);

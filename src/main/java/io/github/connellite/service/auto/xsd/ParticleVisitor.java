@@ -23,6 +23,9 @@ import java.util.Set;
 @UtilityClass
 public class ParticleVisitor {
 
+    /** Pseudo XSD type of a collapsed JAXB {@code java.util.Map} (entry/key/value): a JSON object of strings. */
+    public static final String MAP_TYPE = "map";
+
     public static List<SchemaField> fieldPaths(XmlSchemaComplexType complexType, XmlSchema schema) {
         List<SchemaField> fields = new ArrayList<>();
         collectFieldPaths(complexType.getParticle(), schema, "", true, fields, new LinkedHashSet<>());
@@ -129,7 +132,7 @@ public class ParticleVisitor {
             // JAXB Map<K,V> in XSD is sequence of repeating entry{key,value}.
             // Java beans expose a real Map (no getEntry()), so expand entry[] into SpEL would 502.
             if (!collection && isJaxbMapComplexType(complexType, schema)) {
-                fields.add(new SchemaField(path, "object", required, false));
+                fields.add(new SchemaField(path, MAP_TYPE, required, false));
                 return;
             }
 
