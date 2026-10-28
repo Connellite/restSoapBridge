@@ -116,7 +116,8 @@ public class AutoMappingGenerator {
                         toRestJsonPath(field.path()),
                         field.xsdType(),
                         field.required(),
-                        field.collection()
+                        field.collection(),
+                        field.facets()
                 ))
                 .toList();
     }

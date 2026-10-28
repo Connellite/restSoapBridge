@@ -12,6 +12,7 @@ import org.w3c.dom.Element;
 import javax.wsdl.Definition;
 import javax.wsdl.Types;
 import javax.wsdl.extensions.schema.Schema;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -26,14 +27,16 @@ public class SchemaIndexer {
             return result;
         }
 
+        // Read every inline schema before indexing: a type may extend or use one declared in a later schema.
         XmlSchemaCollection collection = new XmlSchemaCollection();
+        List<XmlSchema> schemas = new ArrayList<>();
         for (Object extension : types.getExtensibilityElements()) {
             if (extension instanceof Schema wsdlSchema) {
                 Element schemaElement = wsdlSchema.getElement();
-                XmlSchema xmlSchema = collection.read(schemaElement, wsdlSchema.getDocumentBaseURI());
-                indexSchema(xmlSchema, result);
+                schemas.add(collection.read(schemaElement, wsdlSchema.getDocumentBaseURI()));
             }
         }
+        schemas.forEach(schema -> indexSchema(schema, result));
         return result;
     }
 

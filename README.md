@@ -114,6 +114,9 @@ before the SOAP call. A mismatch returns `400` with an `errors` list:
 ```
 
 Types and required fields are checked; optional fields may be `null`; `format` (date/time) is not enforced.
+XSD facets are checked as well: `xs:enumeration`, `xs:pattern`, length and numeric range facets
+(`minInclusive`, `maxExclusive`, ...). Patterns that use XSD-only syntax (`\i`, `\c`, `\p{IsBlock}`, class subtraction)
+are not published or checked.
 Numbers and booleans may also be sent as strings (`"42"`, `"1.5"`, `"true"`): they are converted to the XSD type;
 a string that does not look like a number/boolean (`"abc"`) is rejected.
 Operations without XSD field metadata are not validated.
@@ -173,6 +176,20 @@ Dynamic CXF clients (one per WSDL) are cached with Caffeine. Metrics are publish
 
 JSON fields use XSD names, not Java names: JAXB annotations are honoured, so `return`, `class` or `item-id`
 appear in JSON as in the WSDL. XSD dates are written in their lexical form (`2024-01-02T03:04:05+03:00`).
+
+Swagger and validation follow the XSD shape JAXB binds to:
+
+| XSD | JSON |
+|-----|------|
+| `complexContent/extension` (type inheritance) | base type fields, then the derived type fields |
+| `xs:attribute`, `xs:attributeGroup` | ordinary properties next to the elements (`use="required"` → required) |
+| `simpleContent` (text plus attributes) | `{"value": ..., "<attribute>": ...}` |
+| named or anonymous `xs:simpleType` restriction | the built-in base type plus its facets (`enum`, `pattern`, ...) |
+| `xs:list` | array of the item type |
+| `xs:group ref` | the group's elements inline |
+| `xs:choice` | all alternatives as optional fields |
+
+`xs:any`, `xs:union` (published as a string) and substitution groups are not expanded.
 
 ### Version
 

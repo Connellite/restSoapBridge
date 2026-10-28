@@ -74,7 +74,8 @@ public class RequestSchemaValidator {
     /**
      * Without XSD field metadata there is no reliable type information, so such operations are not validated.
      * Unknown fields are rejected at the top level only: nested types may come from XSD constructs the field
-     * index does not expand (e.g. type extension), and a false 400 there would block valid requests.
+     * index does not expand (e.g. {@code xs:any}, substitution groups), and a false 400 there would block valid
+     * requests.
      */
     static Optional<CompiledSchema> compile(List<SchemaField> requestFields, boolean rejectUnknownFields) {
         if (requestFields == null || requestFields.isEmpty()) {
@@ -103,6 +104,8 @@ public class RequestSchemaValidator {
     static void toValidationSchema(ObjectNode schema) {
         schema.remove("example");
         schema.remove("format");
+        toNumericExclusiveBound(schema, "exclusiveMinimum", "minimum");
+        toNumericExclusiveBound(schema, "exclusiveMaximum", "maximum");
         allowStringEncodedScalar(schema);
 
         JsonNode items = schema.get("items");
@@ -180,9 +183,27 @@ public class RequestSchemaValidator {
             return;
         }
         schema.remove("type");
+        JsonNode enumeration = schema.remove("enum");
         ArrayNode anyOf = schema.putArray("anyOf");
-        anyOf.addObject().put("type", type.asText());
-        anyOf.addObject().put("type", "string").put("pattern", pattern);
+        ObjectNode typed = anyOf.addObject().put("type", type.asText());
+        ObjectNode encoded = anyOf.addObject().put("type", "string").put("pattern", pattern);
+        if (enumeration instanceof ArrayNode values) {
+            typed.set("enum", values);
+            ArrayNode texts = encoded.putArray("enum");
+            values.forEach(value -> texts.add(value.asText()));
+        }
+    }
+
+    /** OpenAPI 3.0 flags an exclusive bound ({@code minimum: 0, exclusiveMinimum: true}); draft-07 holds the value. */
+    private static void toNumericExclusiveBound(ObjectNode schema, String exclusiveName, String boundName) {
+        JsonNode exclusive = schema.get(exclusiveName);
+        if (exclusive == null || !exclusive.isBoolean()) {
+            return;
+        }
+        schema.remove(exclusiveName);
+        if (exclusive.booleanValue() && schema.has(boundName)) {
+            schema.set(exclusiveName, schema.remove(boundName));
+        }
     }
 
     /**
@@ -196,6 +217,9 @@ public class RequestSchemaValidator {
     }
 
     private static void allowNull(ObjectNode property) {
+        if (property.get("enum") instanceof ArrayNode enumeration) {
+            enumeration.addNull();
+        }
         JsonNode type = property.get("type");
         if (type != null && type.isTextual()) {
             property.putArray("type").add(type.asText()).add("null");

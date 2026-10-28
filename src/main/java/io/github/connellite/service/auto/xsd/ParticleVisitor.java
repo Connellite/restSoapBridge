@@ -1,19 +1,32 @@
 package io.github.connellite.service.auto.xsd;
 
 import io.github.connellite.model.SchemaField;
+import io.github.connellite.service.auto.xsd.SimpleTypeResolver.SimpleTypeInfo;
 import lombok.experimental.UtilityClass;
 import org.apache.ws.commons.schema.XmlSchema;
 import org.apache.ws.commons.schema.XmlSchemaAll;
 import org.apache.ws.commons.schema.XmlSchemaAllMember;
+import org.apache.ws.commons.schema.XmlSchemaAttribute;
+import org.apache.ws.commons.schema.XmlSchemaAttributeGroup;
+import org.apache.ws.commons.schema.XmlSchemaAttributeGroupRef;
 import org.apache.ws.commons.schema.XmlSchemaChoice;
 import org.apache.ws.commons.schema.XmlSchemaChoiceMember;
+import org.apache.ws.commons.schema.XmlSchemaComplexContentExtension;
+import org.apache.ws.commons.schema.XmlSchemaComplexContentRestriction;
 import org.apache.ws.commons.schema.XmlSchemaComplexType;
+import org.apache.ws.commons.schema.XmlSchemaContent;
 import org.apache.ws.commons.schema.XmlSchemaElement;
+import org.apache.ws.commons.schema.XmlSchemaGroup;
+import org.apache.ws.commons.schema.XmlSchemaGroupRef;
 import org.apache.ws.commons.schema.XmlSchemaParticle;
 import org.apache.ws.commons.schema.XmlSchemaSequence;
 import org.apache.ws.commons.schema.XmlSchemaSequenceMember;
+import org.apache.ws.commons.schema.XmlSchemaSimpleContentExtension;
+import org.apache.ws.commons.schema.XmlSchemaSimpleContentRestriction;
 import org.apache.ws.commons.schema.XmlSchemaType;
+import org.apache.ws.commons.schema.XmlSchemaUse;
 
+import javax.xml.XMLConstants;
 import javax.xml.namespace.QName;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -26,10 +39,156 @@ public class ParticleVisitor {
     /** Pseudo XSD type of a collapsed JAXB {@code java.util.Map} (entry/key/value): a JSON object of strings. */
     public static final String MAP_TYPE = "map";
 
+    /** JSON name of the text of a simple-content type: JAXB binds it to an {@code @XmlValue value} property. */
+    static final String SIMPLE_CONTENT_VALUE = "value";
+
     public static List<SchemaField> fieldPaths(XmlSchemaComplexType complexType, XmlSchema schema) {
         List<SchemaField> fields = new ArrayList<>();
-        collectFieldPaths(complexType.getParticle(), schema, "", true, fields, new LinkedHashSet<>());
+        collectTypeContent(complexType, schema, "", true, fields, new LinkedHashSet<>());
         return fields;
+    }
+
+    /**
+     * Elements and attributes of a complex type. For a derived type the base type content comes first,
+     * as in the JAXB class hierarchy; attributes follow the elements of the same derivation step.
+     */
+    private static void collectTypeContent(
+            XmlSchemaComplexType complexType,
+            XmlSchema schema,
+            String prefix,
+            boolean parentRequired,
+            List<SchemaField> fields,
+            Set<String> visiting
+    ) {
+        XmlSchemaContent content = complexType.getContentModel() != null
+                ? complexType.getContentModel().getContent()
+                : null;
+        if (content instanceof XmlSchemaComplexContentExtension extension) {
+            collectBaseTypeContent(extension.getBaseTypeName(), schema, prefix, parentRequired, fields, visiting);
+            collectFieldPaths(extension.getParticle(), schema, prefix, parentRequired, fields, visiting);
+            collectAttributes(extension.getAttributes(), schema, prefix, parentRequired, fields);
+        } else if (content instanceof XmlSchemaComplexContentRestriction restriction) {
+            // A restriction restates the content it keeps.
+            collectFieldPaths(restriction.getParticle(), schema, prefix, parentRequired, fields, visiting);
+            collectAttributes(restriction.getAttributes(), schema, prefix, parentRequired, fields);
+        } else if (content instanceof XmlSchemaSimpleContentExtension extension) {
+            collectSimpleContent(extension.getBaseTypeName(), schema, prefix, parentRequired, fields, visiting);
+            collectAttributes(extension.getAttributes(), schema, prefix, parentRequired, fields);
+        } else if (content instanceof XmlSchemaSimpleContentRestriction restriction) {
+            collectSimpleContent(restriction.getBaseTypeName(), schema, prefix, parentRequired, fields, visiting);
+            collectAttributes(restriction.getAttributes(), schema, prefix, parentRequired, fields);
+        } else {
+            collectFieldPaths(complexType.getParticle(), schema, prefix, parentRequired, fields, visiting);
+            collectAttributes(complexType.getAttributes(), schema, prefix, parentRequired, fields);
+        }
+    }
+
+    private static void collectBaseTypeContent(
+            QName baseTypeName,
+            XmlSchema schema,
+            String prefix,
+            boolean parentRequired,
+            List<SchemaField> fields,
+            Set<String> visiting
+    ) {
+        if (baseTypeName == null || XMLConstants.W3C_XML_SCHEMA_NS_URI.equals(baseTypeName.getNamespaceURI())) {
+            return;
+        }
+        if (!(ComplexTypeResolver.lookupType(baseTypeName, schema) instanceof XmlSchemaComplexType baseType)) {
+            return;
+        }
+        String typeKey = "base:" + baseTypeName;
+        if (!visiting.add(typeKey)) {
+            return;
+        }
+        collectTypeContent(baseType, schema, prefix, parentRequired, fields, visiting);
+        visiting.remove(typeKey);
+    }
+
+    /**
+     * Simple content: the text value plus attributes. A complex base type (simple content derived from
+     * another one) contributes its value and attributes; a simple base type only types the value.
+     */
+    private static void collectSimpleContent(
+            QName baseTypeName,
+            XmlSchema schema,
+            String prefix,
+            boolean parentRequired,
+            List<SchemaField> fields,
+            Set<String> visiting
+    ) {
+        XmlSchemaType baseType = ComplexTypeResolver.lookupType(baseTypeName, schema);
+        if (baseType instanceof XmlSchemaComplexType) {
+            collectBaseTypeContent(baseTypeName, schema, prefix, parentRequired, fields, visiting);
+            return;
+        }
+        SimpleTypeInfo value = SimpleTypeResolver.resolve(baseTypeName, null, schema);
+        addField(fields, simpleField(prefix + SIMPLE_CONTENT_VALUE, value, parentRequired));
+    }
+
+    private static void collectAttributes(
+            List<?> attributes,
+            XmlSchema schema,
+            String prefix,
+            boolean parentRequired,
+            List<SchemaField> fields
+    ) {
+        collectAttributes(attributes, schema, prefix, parentRequired, fields, new LinkedHashSet<>());
+    }
+
+    private static void collectAttributes(
+            List<?> attributes,
+            XmlSchema schema,
+            String prefix,
+            boolean parentRequired,
+            List<SchemaField> fields,
+            Set<QName> visitingGroups
+    ) {
+        for (Object item : attributes) {
+            if (item instanceof XmlSchemaAttribute attribute) {
+                collectAttribute(attribute, schema, prefix, parentRequired, fields);
+            } else if (item instanceof XmlSchemaAttributeGroupRef groupRef) {
+                XmlSchemaAttributeGroup group = groupRef.getRef().getTarget();
+                if (group != null && visitingGroups.add(groupRef.getRef().getTargetQName())) {
+                    collectAttributes(group.getAttributes(), schema, prefix, parentRequired, fields, visitingGroups);
+                }
+            } else if (item instanceof XmlSchemaAttributeGroup group) {
+                collectAttributes(group.getAttributes(), schema, prefix, parentRequired, fields, visitingGroups);
+            }
+        }
+    }
+
+    private static void collectAttribute(
+            XmlSchemaAttribute attribute,
+            XmlSchema schema,
+            String prefix,
+            boolean parentRequired,
+            List<SchemaField> fields
+    ) {
+        if (attribute.getUse() == XmlSchemaUse.PROHIBITED) {
+            return;
+        }
+        XmlSchemaAttribute resolved = attribute.isRef() && attribute.getRef().getTarget() != null
+                ? attribute.getRef().getTarget()
+                : attribute;
+        String name = attribute.getName() != null ? attribute.getName() : resolved.getName();
+        if (name == null) {
+            return;
+        }
+        SimpleTypeInfo type = SimpleTypeResolver.resolve(resolved.getSchemaTypeName(), resolved.getSchemaType(), schema);
+        boolean required = parentRequired && attribute.getUse() == XmlSchemaUse.REQUIRED;
+        addField(fields, simpleField(prefix + name, type, required));
+    }
+
+    private static SchemaField simpleField(String path, SimpleTypeInfo type, boolean required) {
+        return new SchemaField(type.list() ? path + "[]" : path, type.xsdType(), required, type.list(), type.facets());
+    }
+
+    /** An attribute restated by a derived type, or one named like an element, is listed once. */
+    private static void addField(List<SchemaField> fields, SchemaField field) {
+        if (fields.stream().noneMatch(existing -> existing.path().equals(field.path()))) {
+            fields.add(field);
+        }
     }
 
     private static void collectFieldPaths(
@@ -47,9 +206,10 @@ public class ParticleVisitor {
             collectElementField(element, schema, prefix, parentRequired, fields, visiting);
             return;
         }
+        boolean required = parentRequired && particle.getMinOccurs() > 0;
         if (particle instanceof XmlSchemaSequence sequence) {
             for (XmlSchemaSequenceMember item : sequence.getItems()) {
-                collectSequenceMember(item, schema, prefix, parentRequired, fields, visiting);
+                collectSequenceMember(item, schema, prefix, required, fields, visiting);
             }
         }
         if (particle instanceof XmlSchemaChoice choice) {
@@ -59,12 +219,25 @@ public class ParticleVisitor {
         }
         if (particle instanceof XmlSchemaAll all) {
             for (XmlSchemaAllMember item : all.getItems()) {
-                collectAllMember(item, schema, prefix, parentRequired, fields, visiting);
+                collectAllMember(item, schema, prefix, required, fields, visiting);
             }
+        }
+        if (particle instanceof XmlSchemaGroupRef groupRef) {
+            collectFieldPaths(groupParticle(groupRef, schema), schema, prefix, required, fields, visiting);
         }
     }
 
-    private void collectSequenceMember(
+    private static XmlSchemaParticle groupParticle(XmlSchemaGroupRef groupRef, XmlSchema schema) {
+        if (groupRef.getParticle() != null) {
+            return groupRef.getParticle();
+        }
+        XmlSchemaGroup group = groupRef.getRefName() != null && schema.getParent() != null
+                ? schema.getParent().getGroupByQName(groupRef.getRefName())
+                : null;
+        return group != null ? group.getParticle() : null;
+    }
+
+    private static void collectSequenceMember(
             XmlSchemaSequenceMember item,
             XmlSchema schema,
             String prefix,
@@ -79,7 +252,7 @@ public class ParticleVisitor {
         }
     }
 
-    private void collectChoiceMember(
+    private static void collectChoiceMember(
             XmlSchemaChoiceMember item,
             XmlSchema schema,
             String prefix,
@@ -94,7 +267,7 @@ public class ParticleVisitor {
         }
     }
 
-    private void collectAllMember(
+    private static void collectAllMember(
             XmlSchemaAllMember item,
             XmlSchema schema,
             String prefix,
@@ -109,7 +282,7 @@ public class ParticleVisitor {
         }
     }
 
-    private void collectElementField(
+    private static void collectElementField(
             XmlSchemaElement element,
             XmlSchema schema,
             String prefix,
@@ -144,7 +317,7 @@ public class ParticleVisitor {
 
             List<SchemaField> nestedFields = new ArrayList<>();
             String nestedPrefix = collection ? path + "[]." : path + ".";
-            collectFieldPaths(complexType.getParticle(), schema, nestedPrefix, required, nestedFields, visiting);
+            collectTypeContent(complexType, schema, nestedPrefix, required, nestedFields, visiting);
             visiting.remove(typeKey);
 
             if (collection) {
@@ -158,7 +331,10 @@ public class ParticleVisitor {
             return;
         }
 
-        fields.add(new SchemaField(collection ? path + "[]" : path, xsdTypeName(resolvedElement), required, collection));
+        SimpleTypeInfo type = SimpleTypeResolver.resolve(
+                resolvedElement.getSchemaTypeName(), resolvedElement.getSchemaType(), schema);
+        boolean list = collection || type.list();
+        fields.add(new SchemaField(list ? path + "[]" : path, type.xsdType(), required, list, type.facets()));
     }
 
     private boolean isRepeating(XmlSchemaElement element) {
@@ -227,20 +403,5 @@ public class ParticleVisitor {
             }
         }
         return elements;
-    }
-
-    private String xsdTypeName(XmlSchemaElement element) {
-        QName typeName = element.getSchemaTypeName();
-        if (typeName != null) {
-            return typeName.getLocalPart();
-        }
-        XmlSchemaType schemaType = element.getSchemaType();
-        if (schemaType != null && schemaType.getQName() != null) {
-            return schemaType.getQName().getLocalPart();
-        }
-        if (schemaType != null && schemaType.getName() != null) {
-            return schemaType.getName();
-        }
-        return "string";
     }
 }

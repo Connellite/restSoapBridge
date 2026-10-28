@@ -1,5 +1,6 @@
 package io.github.connellite.config;
 
+import io.github.connellite.model.SchemaFacets;
 import io.github.connellite.model.SchemaField;
 import io.swagger.v3.oas.models.media.ArraySchema;
 import io.swagger.v3.oas.models.media.BooleanSchema;
@@ -10,6 +11,8 @@ import io.swagger.v3.oas.models.media.Schema;
 import io.swagger.v3.oas.models.media.StringSchema;
 import lombok.experimental.UtilityClass;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -17,6 +20,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 @UtilityClass
 public class OpenApiExampleFactory {
@@ -47,7 +52,7 @@ public class OpenApiExampleFactory {
                 continue;
             }
             root.add(path, field);
-            setNestedExample(example, path, sampleValue(field.xsdType()));
+            setNestedExample(example, path, sampleValue(field));
         }
 
         ObjectSchema schema = root.toObjectSchema();
@@ -95,6 +100,53 @@ public class OpenApiExampleFactory {
         StringSchema schema = new StringSchema();
         schema.setExample(String.valueOf(sample));
         return schema;
+    }
+
+    /** The first enumeration value, or a type sample moved into the declared range. */
+    private static Object sampleValue(SchemaField field) {
+        SchemaFacets facets = field.facets();
+        String jsonType = scalarSchema(field.xsdType()).getType();
+        if (!facets.enumeration().isEmpty()) {
+            Object first = typedValue(jsonType, facets.enumeration().get(0));
+            if (first != null) {
+                return first;
+            }
+        }
+        Object sample = sampleValue(field.xsdType());
+        if (!(sample instanceof Number number)) {
+            return sample;
+        }
+        BigDecimal original = new BigDecimal(number.toString());
+        BigDecimal value = original;
+        BigDecimal step = "integer".equals(jsonType) ? BigDecimal.ONE : new BigDecimal("0.5");
+        if (facets.minimum() != null && value.compareTo(facets.minimum()) <= 0) {
+            value = facets.exclusiveMinimum() ? facets.minimum().add(step) : facets.minimum();
+        }
+        if (facets.maximum() != null && value.compareTo(facets.maximum()) >= 0) {
+            value = facets.exclusiveMaximum() ? facets.maximum().subtract(step) : facets.maximum();
+        }
+        return value.compareTo(original) == 0 ? sample : typedValue(jsonType, value.toPlainString());
+    }
+
+    /** A lexical XSD value as the JSON value of an OpenAPI type; {@code null} when it is not one. */
+    private static Object typedValue(String jsonType, String lexical) {
+        try {
+            return switch (jsonType) {
+                case "integer" -> {
+                    BigInteger integer = new BigDecimal(lexical.trim()).toBigIntegerExact();
+                    yield integer.bitLength() < Integer.SIZE ? (Object) integer.intValue() : (Object) integer.longValue();
+                }
+                case "number" -> new BigDecimal(lexical.trim());
+                case "boolean" -> switch (lexical.trim()) {
+                    case "true", "1" -> Boolean.TRUE;
+                    case "false", "0" -> Boolean.FALSE;
+                    default -> null;
+                };
+                default -> lexical;
+            };
+        } catch (ArithmeticException | NumberFormatException exception) {
+            return null;
+        }
     }
 
     private static Object sampleValue(String xsdType) {
@@ -226,6 +278,7 @@ public class OpenApiExampleFactory {
 
         private final String name;
         private String xsdType;
+        private SchemaFacets facets = SchemaFacets.NONE;
         private boolean required;
         private boolean array;
         private final Map<String, SchemaNode> children = new LinkedHashMap<>();
@@ -252,6 +305,7 @@ public class OpenApiExampleFactory {
                 child.array = child.array || segmentArray || (leaf && field.collection());
                 if (leaf) {
                     child.xsdType = field.xsdType();
+                    child.facets = field.facets();
                 }
                 current = child;
             }
@@ -273,7 +327,7 @@ public class OpenApiExampleFactory {
         }
 
         private Schema<?> toSchema() {
-            Schema<?> schema = children.isEmpty() ? scalarSchema(xsdType) : toObjectSchema();
+            Schema<?> schema = children.isEmpty() ? withFacets(scalarSchema(xsdType), facets) : toObjectSchema();
             if (!array) {
                 return schema;
             }
@@ -281,23 +335,82 @@ public class OpenApiExampleFactory {
             arraySchema.setItems(schema);
             return arraySchema;
         }
+    }
 
-        private Schema<?> scalarSchema(String xsdType) {
-            return switch (normalizeXsdType(xsdType)) {
-                case "boolean" -> new BooleanSchema();
-                case "byte", "short", "int", "integer", "unsignedbyte", "unsignedshort", "unsignedint",
-                        "nonnegativeinteger", "nonpositiveinteger", "positiveinteger", "negativeinteger" ->
-                        new IntegerSchema().format("int32");
-                case "long", "unsignedlong" -> new IntegerSchema().format("int64");
-                case "float" -> new NumberSchema().format("float");
-                case "double", "decimal" -> new NumberSchema().format("double");
-                case "date" -> new StringSchema().format("date");
-                case "datetime", "time" -> new StringSchema().format("date-time");
-                case "base64binary", "hexbinary" -> new StringSchema().format("byte");
-                case "object" -> new ObjectSchema();
-                case "map" -> new ObjectSchema().additionalProperties(new StringSchema()).description(MAP_DESCRIPTION);
-                default -> new StringSchema();
-            };
+    private static Schema<?> scalarSchema(String xsdType) {
+        return switch (normalizeXsdType(xsdType)) {
+            case "boolean" -> new BooleanSchema();
+            case "byte", "short", "int", "integer", "unsignedbyte", "unsignedshort", "unsignedint",
+                    "nonnegativeinteger", "nonpositiveinteger", "positiveinteger", "negativeinteger" ->
+                    new IntegerSchema().format("int32");
+            case "long", "unsignedlong" -> new IntegerSchema().format("int64");
+            case "float" -> new NumberSchema().format("float");
+            case "double", "decimal" -> new NumberSchema().format("double");
+            case "date" -> new StringSchema().format("date");
+            case "datetime", "time" -> new StringSchema().format("date-time");
+            case "base64binary", "hexbinary" -> new StringSchema().format("byte");
+            case "object" -> new ObjectSchema();
+            case "map" -> new ObjectSchema().additionalProperties(new StringSchema()).description(MAP_DESCRIPTION);
+            default -> new StringSchema();
+        };
+    }
+
+    /**
+     * XSD facets as OpenAPI 3.0 keywords: {@code enum} typed like the property, length and pattern for strings,
+     * bounds for numbers. Facets that do not fit the JSON type (a date range, an unparsable value) are dropped.
+     */
+    @SuppressWarnings("unchecked")
+    static Schema<?> withFacets(Schema<?> schema, SchemaFacets facets) {
+        if (facets.isEmpty() || schema.getType() == null || "object".equals(schema.getType())) {
+            return schema;
+        }
+        List<Object> enumeration = new ArrayList<>();
+        for (String value : facets.enumeration()) {
+            Object typed = typedValue(schema.getType(), value);
+            if (typed == null) {
+                enumeration.clear();
+                break;
+            }
+            enumeration.add(typed);
+        }
+        if (!enumeration.isEmpty()) {
+            ((Schema<Object>) schema).setEnum(enumeration);
+        }
+        if ("string".equals(schema.getType())) {
+            schema.setMinLength(facets.minLength());
+            schema.setMaxLength(facets.maxLength());
+            schema.setPattern(ecmaPattern(facets.pattern()));
+        }
+        if ("integer".equals(schema.getType()) || "number".equals(schema.getType())) {
+            schema.setMinimum(facets.minimum());
+            schema.setExclusiveMinimum(facets.minimum() != null && facets.exclusiveMinimum() ? Boolean.TRUE : null);
+            schema.setMaximum(facets.maximum());
+            schema.setExclusiveMaximum(facets.maximum() != null && facets.exclusiveMaximum() ? Boolean.TRUE : null);
+        }
+        return schema;
+    }
+
+    /**
+     * An XSD pattern always matches the whole value, so it is anchored. XSD-only syntax ({@code \i}, {@code \c},
+     * {@code \p{IsBlock}}, class subtraction) and literal {@code ^}/{@code $} have no ECMA equivalent: such a
+     * pattern is left out rather than published wrong.
+     */
+    static String ecmaPattern(String xsdPattern) {
+        if (xsdPattern == null || xsdPattern.isEmpty()) {
+            return null;
+        }
+        String withoutNegatedClasses = xsdPattern.replace("[^", "[");
+        if (withoutNegatedClasses.contains("^") || withoutNegatedClasses.contains("$")
+                || xsdPattern.matches("(?s).*\\\\[iIcC].*") || xsdPattern.contains("\\p{Is")
+                || xsdPattern.contains("\\P{Is") || xsdPattern.contains("-[")) {
+            return null;
+        }
+        String anchored = "^(?:" + xsdPattern + ")$";
+        try {
+            Pattern.compile(anchored);
+            return anchored;
+        } catch (PatternSyntaxException exception) {
+            return null;
         }
     }
 }

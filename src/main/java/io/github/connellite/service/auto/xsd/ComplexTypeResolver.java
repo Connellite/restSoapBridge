@@ -2,9 +2,12 @@ package io.github.connellite.service.auto.xsd;
 
 import lombok.experimental.UtilityClass;
 import org.apache.ws.commons.schema.XmlSchema;
+import org.apache.ws.commons.schema.XmlSchemaCollection;
 import org.apache.ws.commons.schema.XmlSchemaComplexType;
 import org.apache.ws.commons.schema.XmlSchemaElement;
 import org.apache.ws.commons.schema.XmlSchemaType;
+
+import javax.xml.namespace.QName;
 
 @UtilityClass
 public class ComplexTypeResolver {
@@ -21,7 +24,7 @@ public class ComplexTypeResolver {
         if (element.getSchemaTypeName() == null) {
             return null;
         }
-        XmlSchemaType resolvedType = schema.getTypeByName(element.getSchemaTypeName());
+        XmlSchemaType resolvedType = lookupType(element.getSchemaTypeName(), schema);
         return resolvedType instanceof XmlSchemaComplexType complexType ? complexType : null;
     }
 
@@ -31,5 +34,18 @@ public class ComplexTypeResolver {
         }
         XmlSchemaElement target = element.getRef().getTarget();
         return target != null ? target : element;
+    }
+
+    /**
+     * A WSDL usually carries one inline schema per namespace, importing the others without a
+     * {@code schemaLocation}; such types are found through the collection, not the schema's own imports.
+     */
+    public static XmlSchemaType lookupType(QName typeName, XmlSchema schema) {
+        if (typeName == null) {
+            return null;
+        }
+        XmlSchemaType type = schema.getTypeByName(typeName);
+        XmlSchemaCollection collection = schema.getParent();
+        return type == null && collection != null ? collection.getTypeByQName(typeName) : type;
     }
 }
