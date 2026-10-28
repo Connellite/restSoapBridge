@@ -1,5 +1,6 @@
 package io.github.connellite.mapper.path;
 
+import io.github.connellite.exception.UpstreamException;
 import lombok.experimental.UtilityClass;
 import org.springframework.beans.BeanWrapperImpl;
 import org.springframework.context.expression.MapAccessor;
@@ -54,8 +55,9 @@ public class SoapPathResolver {
             if (isMissingOptionalProperty(exception)) {
                 return null;
             }
-            throw new IllegalStateException(
-                    "Cannot evaluate SpEL '" + spelExpression + "' on " + root.getClass().getName(),
+            throw UpstreamException.contractMismatch(
+                    "Cannot evaluate response path '" + spelExpression + "' on " + root.getClass().getName()
+                            + ": " + exception.getMessage(),
                     exception);
         }
     }

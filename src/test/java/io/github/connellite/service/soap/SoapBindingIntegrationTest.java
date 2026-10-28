@@ -7,6 +7,7 @@ import io.github.connellite.config.BridgeProperties;
 import io.github.connellite.config.OpenApiExampleFactory;
 import io.github.connellite.config.WsdlUrlCollector;
 import io.github.connellite.exception.RequestValidationException;
+import io.github.connellite.exception.UpstreamException;
 import io.github.connellite.mapper.path.SoapArgument;
 import io.github.connellite.model.DiscoveredSoapService;
 import io.github.connellite.model.MappingDefinition;
@@ -266,7 +267,7 @@ class SoapBindingIntegrationTest {
         MappingDefinition mapping = copy(mapping("createDocument"));
         mapping.setResponse(Map.of("#root.folder.uuid", "$.folder.uuid"));
 
-        IllegalStateException exception = assertThrows(IllegalStateException.class,
+        UpstreamException exception = assertThrows(UpstreamException.class,
                 () -> execute(properties(), mapping, """
                         {"folderUuid": "f-1", "token": "t", "name": "n", "pages": 1}
                         """));
@@ -281,7 +282,7 @@ class SoapBindingIntegrationTest {
         MappingDefinition mapping = copy(mapping("createDocument"));
         mapping.setResponse(Map.of("#root.uuid", "$.uuid", "#root.noSuchField", "$.x"));
 
-        IllegalStateException exception = assertThrows(IllegalStateException.class,
+        UpstreamException exception = assertThrows(UpstreamException.class,
                 () -> execute(properties(), mapping, """
                         {"folderUuid": "f-1", "token": "t", "name": "n", "pages": 1}
                         """));

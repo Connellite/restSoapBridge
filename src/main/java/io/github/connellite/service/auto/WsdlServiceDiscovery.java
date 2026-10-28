@@ -4,16 +4,20 @@ import io.github.connellite.model.DiscoveredSoapService;
 import io.github.connellite.model.WsdlOperationModel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import io.github.connellite.config.BridgeProperties;
+import io.github.connellite.exception.SoapDiscoveryException;
+import org.jsoup.HttpStatusException;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
+import org.springframework.core.NestedExceptionUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
 import java.io.IOException;
 import java.net.URI;
-import java.util.ArrayList;
+import java.time.Duration;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -25,21 +29,31 @@ import java.util.Map;
 public class WsdlServiceDiscovery {
 
     private final WsdlParser wsdlParser;
+    private final BridgeProperties bridgeProperties;
 
-    public List<DiscoveredSoapService> discover(String servicesUrl, List<String> wsdlUrls) throws IOException {
+    /**
+     * Every configured source must be available: an unreachable services page or WSDL, a services page that
+     * lists no services, or a WSDL that cannot be parsed fails discovery at once (and with it the application start).
+     * Nothing configured at all is allowed: the bridge then starts without endpoints.
+     */
+    public List<DiscoveredSoapService> discover(String servicesUrl, List<String> wsdlUrls) {
         Map<String, DiscoveredSoapService> discoveredByWsdl = new LinkedHashMap<>();
 
         if (StringUtils.hasText(servicesUrl)) {
-            discoverFromServicesPageSafely(servicesUrl, discoveredByWsdl);
+            discoverFromServicesPage(servicesUrl.trim(), discoveredByWsdl);
         }
 
         for (String wsdlUrl : nullSafeList(wsdlUrls)) {
             if (!StringUtils.hasText(wsdlUrl) || discoveredByWsdl.containsKey(wsdlUrl)) {
                 continue;
             }
-            DiscoveredSoapService service = discoverFromWsdl(wsdlUrl);
-            discoveredByWsdl.put(wsdlUrl, service);
-            log.debug("Discovered service {} from WSDL URL {}", service.name(), wsdlUrl);
+            try {
+                DiscoveredSoapService service = discoverFromWsdl(wsdlUrl);
+                discoveredByWsdl.put(wsdlUrl, service);
+                log.debug("Discovered service {} from WSDL URL {}", service.name(), wsdlUrl);
+            } catch (RuntimeException exception) {
+                throw new SoapDiscoveryException("wsdl-url " + wsdlUrl + ": " + reason(exception), exception);
+            }
         }
 
         if (discoveredByWsdl.isEmpty()) {
@@ -51,22 +65,37 @@ public class WsdlServiceDiscovery {
         return List.copyOf(discoveredByWsdl.values());
     }
 
-    private void discoverFromServicesPageSafely(String servicesUrl, Map<String, DiscoveredSoapService> discoveredByWsdl) {
-        try {
-            for (DiscoveredSoapService service : discoverFromServicesPage(servicesUrl)) {
-                discoveredByWsdl.putIfAbsent(service.wsdlUrl(), service);
-            }
-        } catch (IOException exception) {
-            log.warn("Cannot discover SOAP services from {}: {}", servicesUrl, exception.getMessage());
-        }
-    }
-
-    private List<DiscoveredSoapService> discoverFromServicesPage(String servicesUrl) throws IOException {
+    private void discoverFromServicesPage(String servicesUrl, Map<String, DiscoveredSoapService> discoveredByWsdl) {
         String baseUrl = normalizeBaseUrl(servicesUrl);
         log.info("Discovering SOAP services from {}", baseUrl);
 
+        Map<String, String> services;
+        try {
+            services = listServices(baseUrl);
+        } catch (IOException | RuntimeException exception) {
+            throw new SoapDiscoveryException("services-url " + baseUrl + ": " + reason(exception), exception);
+        }
+        if (services.isEmpty()) {
+            throw new SoapDiscoveryException(
+                    "services-url " + baseUrl + ": no SOAP services listed (expected a CXF services page)", null);
+        }
+
+        for (Map.Entry<String, String> entry : services.entrySet()) {
+            String wsdlUrl = entry.getValue();
+            try {
+                List<WsdlOperationModel> operations = wsdlParser.parseOperations(wsdlUrl);
+                discoveredByWsdl.putIfAbsent(wsdlUrl, new DiscoveredSoapService(entry.getKey(), wsdlUrl, operations));
+                log.debug("Discovered service {} with {} operation(s)", entry.getKey(), operations.size());
+            } catch (RuntimeException exception) {
+                throw new SoapDiscoveryException(
+                        "WSDL of service " + entry.getKey() + " listed at services-url: " + reason(exception), exception);
+            }
+        }
+    }
+
+    private Map<String, String> listServices(String baseUrl) throws IOException {
         Document document = Jsoup.connect(baseUrl)
-                .timeout(30_000)
+                .timeout((int) pageTimeout().toMillis())
                 .get();
 
         Map<String, String> services = new LinkedHashMap<>();
@@ -86,20 +115,32 @@ public class WsdlServiceDiscovery {
             }
             services.putIfAbsent(serviceName, wsdlLink.attr("abs:href"));
         }
+        return services;
+    }
 
-        if (services.isEmpty()) {
-            log.warn("No SOAP services found at {}", baseUrl);
-            return List.of();
-        }
+    /**
+     * Jsoup has one timeout for connecting and for each read; use the longer of the configured ones.
+     */
+    private Duration pageTimeout() {
+        BridgeProperties.AutoMapping auto = bridgeProperties.getAuto() != null
+                ? bridgeProperties.getAuto()
+                : new BridgeProperties.AutoMapping();
+        return auto.getConnectTimeout().compareTo(auto.getReceiveTimeout()) >= 0
+                ? auto.getConnectTimeout()
+                : auto.getReceiveTimeout();
+    }
 
-        List<DiscoveredSoapService> discovered = new ArrayList<>();
-        for (Map.Entry<String, String> entry : services.entrySet()) {
-            String wsdlUrl = entry.getValue();
-            List<WsdlOperationModel> operations = wsdlParser.parseOperations(wsdlUrl);
-            discovered.add(new DiscoveredSoapService(entry.getKey(), wsdlUrl, operations));
-            log.debug("Discovered service {} with {} operation(s)", entry.getKey(), operations.size());
+    private static String reason(Throwable failure) {
+        if (failure instanceof HttpStatusException httpStatus) {
+            return "HTTP " + httpStatus.getStatusCode();
         }
-        return discovered;
+        if (failure instanceof IllegalStateException && failure.getMessage() != null
+                && failure.getMessage().startsWith("Failed to load WSDL ")) {
+            return failure.getMessage().substring("Failed to load ".length());
+        }
+        Throwable root = NestedExceptionUtils.getMostSpecificCause(failure);
+        String message = root.getMessage();
+        return root.getClass().getSimpleName() + (message != null && !message.isBlank() ? " " + message : "");
     }
 
     public DiscoveredSoapService discoverFromWsdl(String wsdlUrl) {

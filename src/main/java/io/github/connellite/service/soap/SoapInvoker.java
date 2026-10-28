@@ -4,7 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.connellite.config.BridgeProperties;
 import io.github.connellite.correlation.CorrelationId;
 import io.github.connellite.exception.RequestValidationException;
-import io.github.connellite.exception.SoapFaultException;
+import io.github.connellite.exception.BackendFailures;
+import io.github.connellite.exception.UpstreamException;
 import io.github.connellite.exception.TypeCoercionException;
 import io.github.connellite.mapper.path.JaxbMaps;
 import io.github.connellite.mapper.path.SoapArgument;
@@ -66,11 +67,11 @@ public class SoapInvoker {
      */
     public Object invoke(String wsdlUrl, String operation, List<SoapArgument> arguments,
                          Map<String, List<String>> backendHeaders) {
-        Client client = clientPool.getClient(wsdlUrl);
+        Client client = client(wsdlUrl);
         BindingOperationInfo operationInfo = findOperation(client, operation);
         if (operationInfo == null) {
-            throw new IllegalArgumentException("SOAP operation '" + operation + "' not found in "
-                    + client.getEndpoint().getEndpointInfo().getName());
+            throw UpstreamException.contractMismatch("SOAP operation '" + operation + "' not found in "
+                    + client.getEndpoint().getEndpointInfo().getName(), null);
         }
         // Same resolution as Client#invoke(String, Object...): unwrapped (document/literal wrapped) when possible.
         BindingOperationInfo invocable = operationInfo.isUnwrappedCapable()
@@ -91,7 +92,15 @@ public class SoapInvoker {
             }
             return response;
         } catch (Exception exception) {
-            throw SoapFaultException.from(exception);
+            throw BackendFailures.classify(exception, bridgeProperties.getErrors().getFaultStatus());
+        }
+    }
+
+    private Client client(String wsdlUrl) {
+        try {
+            return clientPool.getClient(wsdlUrl);
+        } catch (RuntimeException exception) {
+            throw BackendFailures.clientCreation(wsdlUrl, exception);
         }
     }
 

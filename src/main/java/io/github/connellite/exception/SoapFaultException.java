@@ -1,38 +1,29 @@
 package io.github.connellite.exception;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.Getter;
-import org.apache.cxf.binding.soap.SoapFault;
-import org.springframework.core.NestedExceptionUtils;
+
+import java.util.List;
 
 @Getter
-public class SoapFaultException extends RuntimeException {
+public class SoapFaultException extends UpstreamException {
 
     private final String faultName;
-    private final int httpStatus;
     private final String faultCode;
+    private final List<String> faultSubcodes;
+    /** Declared fault detail bean as JSON, or {@code null}. */
+    private final JsonNode faultInfo;
 
-    public SoapFaultException(String faultName, String message, int httpStatus, String faultCode, Throwable cause) {
-        super(message, cause);
+    public SoapFaultException(String faultName, String message, int httpStatus, String faultCode,
+                              List<String> faultSubcodes, JsonNode faultInfo, Throwable cause) {
+        super(httpStatus, "SOAP Fault", message, cause);
         this.faultName = faultName;
-        this.httpStatus = httpStatus;
         this.faultCode = faultCode;
+        this.faultSubcodes = faultSubcodes == null ? List.of() : List.copyOf(faultSubcodes);
+        this.faultInfo = faultInfo;
     }
 
-    public static SoapFaultException from(Throwable throwable) {
-        Throwable root = NestedExceptionUtils.getMostSpecificCause(throwable);
-        String className = root.getClass().getSimpleName();
-        String faultName = className.endsWith("_Exception")
-                ? className.substring(0, className.length() - "_Exception".length())
-                : className;
-        int status = switch (faultName) {
-            case "AccessDeniedException" -> 401;
-            case "RepositoryException", "DatabaseException" -> 500;
-            default -> 502;
-        };
-        String message = root.getMessage() != null ? root.getMessage() : faultName;
-        String faultCode = root instanceof SoapFault soapFault && soapFault.getFaultCode() != null
-                ? soapFault.getFaultCode().toString()
-                : null;
-        return new SoapFaultException(faultName, message, status, faultCode, throwable);
+    public SoapFaultException(String faultName, String message, int httpStatus, String faultCode, Throwable cause) {
+        this(faultName, message, httpStatus, faultCode, List.of(), null, cause);
     }
 }

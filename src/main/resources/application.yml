@@ -37,6 +37,10 @@ bridge:
     #   password: secret
     #   password-type: digest
     forward-headers: []
+  errors:
+    # HTTP status per SOAP fault name; unlisted faults -> 502
+    fault-status:
+      AccessDeniedException: 401
   correlation:
     header-name: X-Correlation-Id
     forward-to-backend: true

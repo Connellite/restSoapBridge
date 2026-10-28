@@ -386,11 +386,32 @@ The response depends on WSDL/XSD. For a typical `login`:
 
 ## Common errors
 
+Errors are RFC 7807 problems (`application/problem+json`) with a `correlationId`. The status says whose problem it is:
+
 | HTTP | Cause |
 |------|-------|
+| 400 | Request body does not match the operation schema, unknown field, or a value that cannot become the SOAP type (`errors` list) |
+| 401 | SOAP fault `AccessDeniedException` (see `bridge.errors.fault-status`) |
 | 404 | Endpoint not generated (operation missing in WSDL or different `path-prefix`) |
-| 401 | SOAP `AccessDeniedException` |
-| 502 | SOAP error, WSDL/XSD parsing failure, or backend unreachable |
+| 500 | Bug in the bridge itself (e.g. `NullPointerException`); details only in the server log under the same `correlationId` |
+| 502 | SOAP fault from the backend (`faultName`, `faultCode`, `faultSubcodes`, `faultInfo`), backend HTTP error, unreadable response, or response that does not match the generated mapping |
+| 503 | Backend not reachable (connection refused, unknown host, WSDL cannot be loaded) or backend answered 503; also no mappings loaded |
+| 504 | Backend did not answer within `bridge.auto.receive-timeout` |
+
+`faultName` is the declared WSDL fault (`AccessDeniedException` for class `AccessDeniedException_Exception`) or `SoapFault`
+for undeclared ones. `faultCode` is only known for undeclared faults: CXF rebuilds declared ones from the fault bean
+(`faultInfo`). Map fault names to statuses:
+
+```yaml
+bridge:
+  errors:
+    fault-status:
+      AccessDeniedException: 401
+      NotFoundException: 404
+      ConflictException: 409
+```
+
+Unlisted faults give 502; a non-standard status code falls back to 502.
 
 ---
 

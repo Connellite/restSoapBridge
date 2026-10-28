@@ -37,7 +37,7 @@
         <jsoup.version>1.19.1</jsoup.version>
         <wsdl4j.version>1.6.3</wsdl4j.version>
         <xmlschema.version>2.3.1</xmlschema.version>
-        <extralib.version>1.5.1</extralib.version>
+        <extralib.version>1.5.2</extralib.version>
         <json-schema-validator.version>1.5.9</json-schema-validator.version>
         <jackson.xmlbind.artifact>jackson-module-jaxb-annotations</jackson.xmlbind.artifact>
     </properties>

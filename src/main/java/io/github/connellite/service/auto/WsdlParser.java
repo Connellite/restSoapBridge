@@ -2,7 +2,10 @@ package io.github.connellite.service.auto;
 
 import io.github.connellite.model.WsdlOperationModel;
 import io.github.connellite.model.SchemaField;
+import io.github.connellite.config.BridgeProperties;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.NestedExceptionUtils;
 import org.springframework.stereotype.Service;
 
 import javax.wsdl.Definition;
@@ -16,6 +19,7 @@ import javax.wsdl.WSDLException;
 import javax.wsdl.factory.WSDLFactory;
 import javax.wsdl.xml.WSDLReader;
 import javax.xml.namespace.QName;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -28,6 +32,22 @@ import java.util.concurrent.ConcurrentMap;
 public class WsdlParser {
 
     private final ConcurrentMap<String, List<WsdlOperationModel>> operationCache = new ConcurrentHashMap<>();
+    private final Duration connectTimeout;
+    private final Duration readTimeout;
+
+    public WsdlParser() {
+        this(new BridgeProperties.AutoMapping());
+    }
+
+    @Autowired
+    public WsdlParser(BridgeProperties bridgeProperties) {
+        this(bridgeProperties.getAuto() != null ? bridgeProperties.getAuto() : new BridgeProperties.AutoMapping());
+    }
+
+    private WsdlParser(BridgeProperties.AutoMapping auto) {
+        this.connectTimeout = auto.getConnectTimeout();
+        this.readTimeout = auto.getReceiveTimeout();
+    }
 
     public List<WsdlOperationModel> parseOperations(String wsdlUrl) {
         return operationCache.computeIfAbsent(wsdlUrl, this::parseOperationsFromWsdl);
@@ -37,7 +57,7 @@ public class WsdlParser {
         try {
             WSDLReader reader = WSDLFactory.newInstance().newWSDLReader();
             reader.setFeature("javax.wsdl.verbose", false);
-            Definition definition = reader.readWSDL(wsdlUrl);
+            Definition definition = readDefinition(reader, wsdlUrl);
 
             Map<String, String> messageToElement = readMessageElements(definition);
             Map<String, List<String>> elementFields = XsdFieldIndex.readElementFields(definition);
@@ -74,9 +94,24 @@ public class WsdlParser {
                 }
             }
             return List.copyOf(result);
-        } catch (WSDLException exception) {
-            throw new IllegalStateException("Failed to parse WSDL: " + wsdlUrl, exception);
+        } catch (WSDLException | RuntimeException exception) {
+            throw new IllegalStateException("Failed to load WSDL " + wsdlUrl + ": " + rootMessage(exception), exception);
         }
+    }
+
+    private Definition readDefinition(WSDLReader reader, String wsdlUrl) throws WSDLException {
+        TimeoutWsdlLocator locator = new TimeoutWsdlLocator(wsdlUrl, connectTimeout, readTimeout);
+        try {
+            return reader.readWSDL(locator);
+        } finally {
+            locator.close();
+        }
+    }
+
+    private static String rootMessage(Throwable failure) {
+        Throwable root = NestedExceptionUtils.getMostSpecificCause(failure);
+        String message = root.getMessage();
+        return root.getClass().getSimpleName() + (message != null && !message.isBlank() ? " " + message : "");
     }
 
     private Map<String, String> readMessageElements(Definition definition) {

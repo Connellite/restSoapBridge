@@ -6,7 +6,9 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @Getter
 @Setter
@@ -18,6 +20,7 @@ public class BridgeProperties {
     private ClientPool clientPool = new ClientPool();
     private Backend backend = new Backend();
     private Correlation correlation = new Correlation();
+    private Errors errors = new Errors();
 
     @Getter
     @Setter
@@ -27,6 +30,16 @@ public class BridgeProperties {
         private String httpMethod;
         private Duration connectTimeout = Duration.ofSeconds(30);
         private Duration receiveTimeout = Duration.ofSeconds(60);
+    }
+
+    /**
+     * HTTP status of SOAP faults, by fault name: the declared fault class without {@code _Exception}
+     * ({@code AccessDeniedException}) or {@code SoapFault} for undeclared ones. Unlisted faults give 502.
+     */
+    @Getter
+    @Setter
+    public static class Errors {
+        private Map<String, Integer> faultStatus = new LinkedHashMap<>(Map.of("AccessDeniedException", 401));
     }
 
     /**

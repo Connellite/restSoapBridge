@@ -3,6 +3,7 @@ package io.github.connellite.service.impl;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.connellite.exception.UpstreamException;
 import io.github.connellite.mapper.PathResolver;
 import io.github.connellite.mapper.path.SoapArgument;
 import io.github.connellite.mapper.path.SoapJsonMapper;
@@ -61,10 +62,10 @@ public class BridgeServiceImpl implements BridgeService {
             return;
         }
         String payload = actual.toString();
-        throw new IllegalStateException("SOAP response " + soapResult.getClass().getName() + " of "
+        throw UpstreamException.contractMismatch("SOAP response " + soapResult.getClass().getName() + " of "
                 + mapping.getSoap().getService() + "." + mapping.getSoap().getOperation()
                 + " does not match response mapping " + responseMappings(mapping) + "; payload: "
-                + (payload.length() > 500 ? payload.substring(0, 500) + "..." : payload));
+                + (payload.length() > 500 ? payload.substring(0, 500) + "..." : payload), null);
     }
 
     private static List<String> responseMappings(MappingDefinition mapping) {
