@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.networknt.schema.JsonSchema;
 import com.networknt.schema.JsonSchemaFactory;
+import com.networknt.schema.SchemaValidatorsConfig;
 import com.networknt.schema.SpecVersion;
 import com.networknt.schema.ValidationMessage;
 import io.github.connellite.config.BridgeProperties;
@@ -21,6 +22,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -41,6 +43,10 @@ public class RequestSchemaValidator {
     );
 
     private static final JsonSchemaFactory SCHEMA_FACTORY = JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V7);
+    /** Messages are part of the API response: English whatever the default locale of the JVM. */
+    private static final SchemaValidatorsConfig SCHEMA_CONFIG = SchemaValidatorsConfig.builder()
+            .locale(Locale.ENGLISH)
+            .build();
 
     private final BridgeProperties bridgeProperties;
     private final Map<String, Optional<CompiledSchema>> schemas = new ConcurrentHashMap<>();
@@ -90,7 +96,7 @@ public class RequestSchemaValidator {
         if (rejectUnknownFields) {
             schema.put("additionalProperties", false);
         }
-        return Optional.of(new CompiledSchema(SCHEMA_FACTORY.getSchema(schema), List.copyOf(rootFields)));
+        return Optional.of(new CompiledSchema(SCHEMA_FACTORY.getSchema(schema, SCHEMA_CONFIG), List.copyOf(rootFields)));
     }
 
     record CompiledSchema(JsonSchema schema, List<String> rootFields) {
