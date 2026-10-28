@@ -34,6 +34,7 @@ public class WsdlServiceDiscovery {
     /**
      * Every configured source must be available: an unreachable services page or WSDL, a services page that
      * lists no services, or a WSDL that cannot be parsed fails discovery at once (and with it the application start).
+     * With {@code bridge.auto.fail-on-unavailable=false} such a source is logged and skipped instead.
      * Nothing configured at all is allowed: the bridge then starts without endpoints.
      */
     public List<DiscoveredSoapService> discover(String servicesUrl, List<String> wsdlUrls) {
@@ -52,7 +53,7 @@ public class WsdlServiceDiscovery {
                 discoveredByWsdl.put(wsdlUrl, service);
                 log.debug("Discovered service {} from WSDL URL {}", service.name(), wsdlUrl);
             } catch (RuntimeException exception) {
-                throw new SoapDiscoveryException("wsdl-url " + wsdlUrl + ": " + reason(exception), exception);
+                unavailable("wsdl-url " + wsdlUrl + ": " + reason(exception), exception);
             }
         }
 
@@ -73,11 +74,12 @@ public class WsdlServiceDiscovery {
         try {
             services = listServices(baseUrl);
         } catch (IOException | RuntimeException exception) {
-            throw new SoapDiscoveryException("services-url " + baseUrl + ": " + reason(exception), exception);
+            unavailable("services-url " + baseUrl + ": " + reason(exception), exception);
+            return;
         }
         if (services.isEmpty()) {
-            throw new SoapDiscoveryException(
-                    "services-url " + baseUrl + ": no SOAP services listed (expected a CXF services page)", null);
+            unavailable("services-url " + baseUrl + ": no SOAP services listed (expected a CXF services page)", null);
+            return;
         }
 
         for (Map.Entry<String, String> entry : services.entrySet()) {
@@ -87,10 +89,16 @@ public class WsdlServiceDiscovery {
                 discoveredByWsdl.putIfAbsent(wsdlUrl, new DiscoveredSoapService(entry.getKey(), wsdlUrl, operations));
                 log.debug("Discovered service {} with {} operation(s)", entry.getKey(), operations.size());
             } catch (RuntimeException exception) {
-                throw new SoapDiscoveryException(
-                        "WSDL of service " + entry.getKey() + " listed at services-url: " + reason(exception), exception);
+                unavailable("WSDL of service " + entry.getKey() + " listed at services-url: " + reason(exception), exception);
             }
         }
+    }
+
+    private void unavailable(String message, Throwable cause) {
+        if (bridgeProperties.getAuto() == null || bridgeProperties.getAuto().isFailOnUnavailable()) {
+            throw new SoapDiscoveryException(message, cause);
+        }
+        log.warn("Skipping unavailable SOAP source {}", message);
     }
 
     private Map<String, String> listServices(String baseUrl) throws IOException {

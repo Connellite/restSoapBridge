@@ -18,6 +18,8 @@ bridge:
     # optional individual WSDL URLs (any suffix: wsdl-url, wsdl-1-url, wsdl-auth-url, ...)
     # wsdl-url: http://127.0.0.1:8080/services/Auth?wsdl
     # wsdl-1-url: http://127.0.0.1:8080/services/ResultList?wsdl
+    # true: do not start if services-url or any wsdl-*-url is unavailable; false: log a warning and skip it
+    fail-on-unavailable: true
     path-prefix: /api
     http-method: POST
     connect-timeout: 30s

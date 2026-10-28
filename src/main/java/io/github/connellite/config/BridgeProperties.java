@@ -30,6 +30,11 @@ public class BridgeProperties {
         private String httpMethod;
         private Duration connectTimeout = Duration.ofSeconds(30);
         private Duration receiveTimeout = Duration.ofSeconds(60);
+        /**
+         * Do not start when a configured services page or WSDL is unavailable; {@code false} logs a warning
+         * and skips that source.
+         */
+        private boolean failOnUnavailable = true;
     }
 
     /**

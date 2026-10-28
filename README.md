@@ -92,6 +92,7 @@ logging:
 | `services-url` | URL of the CXF services listing page | `http://127.0.0.1:8080/services/` |
 | `path-prefix` | REST path prefix | `/api` |
 | `http-method` | HTTP method for all generated endpoints | `POST` |
+| `fail-on-unavailable` | `true`: do not start if `services-url` or any `wsdl-*-url` is unavailable; `false`: log a warning and skip that source | `true` |
 
 `path-prefix` must not be `/`: generated endpoints would shadow Swagger UI and actuator.
 
