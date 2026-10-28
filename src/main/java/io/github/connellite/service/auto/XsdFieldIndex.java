@@ -22,4 +22,8 @@ final class XsdFieldIndex {
     static Map<String, List<SchemaField>> readElementSchemaFields(Definition definition) {
         return SchemaIndexer.readElementSchemaFields(definition);
     }
+
+    static Map<String, SchemaField> readSimpleElements(Definition definition) {
+        return SchemaIndexer.readSimpleElements(definition);
+    }
 }

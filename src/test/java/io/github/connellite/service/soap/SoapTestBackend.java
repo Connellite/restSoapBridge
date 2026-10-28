@@ -18,6 +18,7 @@ import org.springframework.beans.factory.support.StaticListableBeanFactory;
 
 import java.net.ServerSocket;
 import java.util.List;
+import java.util.function.Consumer;
 
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -32,24 +33,42 @@ final class SoapTestBackend implements AutoCloseable {
     private final String serviceName;
     private final String wsdlUrl;
     private final List<MappingDefinition> mappings;
+    private final BridgeProperties properties;
 
-    private SoapTestBackend(Server server, String serviceName, String wsdlUrl, List<MappingDefinition> mappings) {
+    private SoapTestBackend(Server server, String serviceName, String wsdlUrl, List<MappingDefinition> mappings,
+                            BridgeProperties properties) {
         this.server = server;
         this.serviceName = serviceName;
         this.wsdlUrl = wsdlUrl;
         this.mappings = mappings;
+        this.properties = properties;
     }
 
     static SoapTestBackend start(String serviceName, Class<?> serviceClass, Object serviceBean) throws Exception {
+        return start(serviceName, serviceClass, serviceBean, properties());
+    }
+
+    static SoapTestBackend start(String serviceName, Class<?> serviceClass, Object serviceBean,
+                                 BridgeProperties properties) throws Exception {
+        return start(serviceName, factory -> {
+            factory.setServiceClass(serviceClass);
+            factory.setServiceBean(serviceBean);
+        }, properties);
+    }
+
+    /**
+     * @param server sets up the endpoint, e.g. a {@code Provider} published from a hand-written WSDL
+     */
+    static SoapTestBackend start(String serviceName, Consumer<JaxWsServerFactoryBean> server,
+                                 BridgeProperties properties) throws Exception {
         int port;
         try (ServerSocket socket = new ServerSocket(0)) {
             port = socket.getLocalPort();
         }
         JaxWsServerFactoryBean factory = new JaxWsServerFactoryBean();
-        factory.setServiceClass(serviceClass);
-        factory.setServiceBean(serviceBean);
+        server.accept(factory);
         factory.setAddress("http://localhost:" + port + "/services/" + serviceName);
-        Server server = factory.create();
+        Server endpoint = factory.create();
         String wsdlUrl = "http://localhost:" + port + "/services/" + serviceName + "?wsdl";
 
         WsdlServiceDiscovery discovery = mock(WsdlServiceDiscovery.class);
@@ -57,8 +76,8 @@ final class SoapTestBackend implements AutoCloseable {
         when(collector.wsdlUrls()).thenReturn(List.of());
         when(discovery.discover(null, List.of())).thenReturn(List.of(new DiscoveredSoapService(
                 serviceName, wsdlUrl, new WsdlParser().parseOperations(wsdlUrl))));
-        List<MappingDefinition> mappings = new AutoMappingGenerator(properties(), discovery, collector).generate();
-        return new SoapTestBackend(server, serviceName, wsdlUrl, mappings);
+        List<MappingDefinition> mappings = new AutoMappingGenerator(properties, discovery, collector).generate();
+        return new SoapTestBackend(endpoint, serviceName, wsdlUrl, mappings, properties);
     }
 
     static BridgeProperties properties() {
@@ -86,7 +105,11 @@ final class SoapTestBackend implements AutoCloseable {
     }
 
     ObjectNode execute(String operation, JsonNode body) throws Exception {
-        return execute(properties(), mapping(operation), body);
+        return execute(properties, mapping(operation), body);
+    }
+
+    String address() {
+        return server.getEndpoint().getEndpointInfo().getAddress();
     }
 
     ObjectNode execute(BridgeProperties properties, MappingDefinition mapping, JsonNode body) throws Exception {

@@ -29,18 +29,18 @@ class SoapClientPoolTest {
     @Test
     void createsOneClientPerWsdlUrl() {
         Client client = mock(Client.class);
-        when(factory.create(WSDL)).thenReturn(client);
+        when(factory.create(WSDL, null)).thenReturn(client);
         SoapClientPool pool = new SoapClientPool(properties, factory, meterRegistry(null));
 
         assertSame(client, pool.getClient(WSDL));
         assertSame(client, pool.getClient(WSDL));
-        verify(factory, times(1)).create(WSDL);
+        verify(factory, times(1)).create(WSDL, null);
     }
 
     @Test
     void failedCreationIsNotCached() {
         Client client = mock(Client.class);
-        when(factory.create(WSDL))
+        when(factory.create(WSDL, null))
                 .thenThrow(new IllegalStateException("backend down"))
                 .thenReturn(client);
         SoapClientPool pool = new SoapClientPool(properties, factory, meterRegistry(null));
@@ -57,7 +57,7 @@ class SoapClientPoolTest {
     @Test
     void destroysClientsOnShutdown() {
         Client client = mock(Client.class);
-        when(factory.create(WSDL)).thenReturn(client);
+        when(factory.create(WSDL, null)).thenReturn(client);
         SoapClientPool pool = new SoapClientPool(properties, factory, meterRegistry(null));
         pool.getClient(WSDL);
 
@@ -71,8 +71,8 @@ class SoapClientPoolTest {
         properties.getClientPool().setMaximumSize(1);
         Client first = mock(Client.class);
         Client second = mock(Client.class);
-        when(factory.create("first")).thenReturn(first);
-        when(factory.create("second")).thenReturn(second);
+        when(factory.create("first", null)).thenReturn(first);
+        when(factory.create("second", null)).thenReturn(second);
         SoapClientPool pool = new SoapClientPool(properties, factory, meterRegistry(null));
 
         pool.getClient("first");
@@ -87,14 +87,14 @@ class SoapClientPoolTest {
         properties.getClientPool().setRefreshAfterWrite(Duration.ofMillis(50));
         Client original = mock(Client.class);
         Client refreshed = mock(Client.class);
-        when(factory.create(WSDL)).thenReturn(original, refreshed);
+        when(factory.create(WSDL, null)).thenReturn(original, refreshed);
         SoapClientPool pool = new SoapClientPool(properties, factory, meterRegistry(null));
 
         assertSame(original, pool.getClient(WSDL));
         Thread.sleep(100);
         pool.getClient(WSDL); // triggers the asynchronous refresh
 
-        verify(factory, timeout(2000).times(2)).create(WSDL);
+        verify(factory, timeout(2000).times(2)).create(WSDL, null);
         long deadline = System.currentTimeMillis() + 2000;
         while (pool.getClient(WSDL) == original && System.currentTimeMillis() < deadline) {
             Thread.sleep(10);
@@ -105,7 +105,7 @@ class SoapClientPoolTest {
 
     @Test
     void publishesCacheMetrics() {
-        when(factory.create(WSDL)).thenReturn(mock(Client.class));
+        when(factory.create(WSDL, null)).thenReturn(mock(Client.class));
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         SoapClientPool pool = new SoapClientPool(properties, factory, meterRegistry(registry));
 

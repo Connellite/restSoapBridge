@@ -41,6 +41,20 @@ public class MappingRegistry {
                 .findFirst();
     }
 
+    /** Values of the {@code {name}} segments of the mapping path, e.g. {@code uuid} of {@code /api/docs/{uuid}}. */
+    public Map<String, String> pathVariables(MappingDefinition mapping, String requestPath) {
+        String pattern = normalizePath(mapping.getPath());
+        return pathMatcher.isPattern(pattern)
+                ? pathMatcher.extractUriTemplateVariables(pattern, normalizePath(requestPath))
+                : Map.of();
+    }
+
+    private static String describe(MappingDefinition mapping) {
+        return mapping.getSoap() != null
+                ? mapping.getSoap().getService() + "." + mapping.getSoap().getOperation()
+                : mapping.getPath();
+    }
+
     private HttpMethod resolveMethod(String httpMethod) {
         if (httpMethod == null || httpMethod.isBlank()) {
             return null;
@@ -58,6 +72,14 @@ public class MappingRegistry {
             mappingsByMethod.computeIfAbsent(method, ignored -> new java.util.ArrayList<>()).add(mapping);
 
             String path = normalizePath(mapping.getPath());
+            MappingDefinition duplicate = mappingsByMethod.get(method).stream()
+                    .filter(other -> other != mapping && normalizePath(other.getPath()).equals(path))
+                    .findFirst()
+                    .orElse(null);
+            if (duplicate != null) {
+                throw new IllegalStateException("Duplicate endpoint " + method + " " + path + ": "
+                        + describe(duplicate) + " and " + describe(mapping) + " (see bridge.operations)");
+            }
             if (!pathMatcher.isPattern(path)) {
                 exactRoutes.put(new RouteKey(method, path), mapping);
             }

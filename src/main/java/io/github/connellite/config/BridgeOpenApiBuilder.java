@@ -2,16 +2,22 @@ package io.github.connellite.config;
 
 import io.github.connellite.model.MappingDefinition;
 import io.github.connellite.model.MappingRegistry;
+import io.github.connellite.service.auto.AutoMappingGenerator;
 import io.swagger.v3.oas.models.Components;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.PathItem;
 import io.swagger.v3.oas.models.Paths;
 import io.swagger.v3.oas.models.info.Info;
+import io.swagger.v3.oas.models.media.ArraySchema;
 import io.swagger.v3.oas.models.media.Content;
 import io.swagger.v3.oas.models.media.MediaType;
 import io.swagger.v3.oas.models.media.ObjectSchema;
 import io.swagger.v3.oas.models.media.Schema;
+import io.swagger.v3.oas.models.media.StringSchema;
+import io.swagger.v3.oas.models.parameters.Parameter;
+import io.swagger.v3.oas.models.parameters.PathParameter;
+import io.swagger.v3.oas.models.parameters.QueryParameter;
 import io.swagger.v3.oas.models.parameters.RequestBody;
 import io.swagger.v3.oas.models.responses.ApiResponse;
 import io.swagger.v3.oas.models.responses.ApiResponses;
@@ -39,6 +45,7 @@ import static io.github.connellite.config.OpenApiExampleFactory.schemaWithXsdExa
 public class BridgeOpenApiBuilder {
 
     private static final Pattern INVALID_COMPONENT_KEY_CHARS = Pattern.compile("[^a-zA-Z0-9._-]");
+    private static final Set<String> QUERY_METHODS = Set.of("GET", "DELETE");
 
     private final MappingRegistry mappingRegistry;
     private final ObjectProvider<BuildProperties> buildProperties;
@@ -82,8 +89,18 @@ public class BridgeOpenApiBuilder {
                     .tags(List.of(service))
                     .summary(mapping.getSoap().getOperation())
                     .description(buildDescription(mapping))
-                    .requestBody(buildRequestBody(mapping, requestSchemaName, requestSchema))
                     .responses(buildResponses(responseSchemaName, responseSchema));
+            List<String> pathVariables = AutoMappingGenerator.pathVariables(mapping.getPath());
+            pathVariables.forEach(variable -> operation.addParametersItem(new PathParameter()
+                    .name(variable)
+                    .required(true)
+                    .schema(parameterSchema(requestSchema, variable))));
+            if (QUERY_METHODS.contains(mapping.getMethod().toUpperCase(Locale.ROOT))) {
+                queryParameters(requestSchema, "", pathVariables).forEach(operation::addParametersItem);
+            } else {
+                pathVariables.forEach(variable -> removeRequired(requestSchema, variable));
+                operation.requestBody(buildRequestBody(mapping, requestSchemaName, requestSchema));
+            }
 
             PathItem pathItem = paths.getOrDefault(mapping.getPath(), new PathItem());
             applyHttpMethod(pathItem, mapping.getMethod(), operation);
@@ -130,6 +147,66 @@ public class BridgeOpenApiBuilder {
         return new RequestBody()
                 .required(!mapping.getRequest().isEmpty())
                 .content(new Content().addMediaType("application/json", mediaType));
+    }
+
+    /**
+     * {@code GET}/{@code DELETE} take their fields from the query string: scalars and arrays of scalars,
+     * nested objects as dotted names ({@code customer.name}). Arrays of objects and maps have no query form.
+     */
+    @SuppressWarnings("rawtypes")
+    private static List<Parameter> queryParameters(Schema<?> schema, String prefix, List<String> pathVariables) {
+        List<Parameter> parameters = new ArrayList<>();
+        if (schema.getProperties() == null) {
+            return parameters;
+        }
+        List<String> required = schema.getRequired() != null ? schema.getRequired() : List.of();
+        for (Map.Entry<String, Schema> property : schema.getProperties().entrySet()) {
+            String name = prefix + property.getKey();
+            Schema<?> value = property.getValue();
+            if (pathVariables.contains(name)) {
+                continue;
+            }
+            if ("object".equals(value.getType()) && value.getProperties() != null) {
+                parameters.addAll(queryParameters(value, name + ".", pathVariables));
+            } else if (isQueryValue(value)) {
+                parameters.add(new QueryParameter()
+                        .name(name)
+                        .required(prefix.isEmpty() && required.contains(property.getKey()))
+                        .schema(value));
+            }
+        }
+        return parameters;
+    }
+
+    private static boolean isQueryValue(Schema<?> schema) {
+        if (schema instanceof ArraySchema array) {
+            return array.getItems() != null && isQueryValue(array.getItems());
+        }
+        return schema.getType() != null && !"object".equals(schema.getType());
+    }
+
+    /** Schema of the (possibly dotted) request field a path variable fills; a string when it is unknown. */
+    @SuppressWarnings("rawtypes")
+    private static Schema<?> parameterSchema(Schema<?> schema, String dottedName) {
+        Schema<?> current = schema;
+        for (String segment : dottedName.split("\\.")) {
+            Map<String, Schema> properties = current.getProperties();
+            current = properties != null ? properties.get(segment) : null;
+            if (current == null) {
+                return new StringSchema();
+            }
+        }
+        return current;
+    }
+
+    /** A field filled from the path need not be in the body. */
+    private static void removeRequired(Schema<?> schema, String dottedName) {
+        if (dottedName.contains(".") || schema.getRequired() == null) {
+            return;
+        }
+        List<String> required = new ArrayList<>(schema.getRequired());
+        required.remove(dottedName);
+        schema.setRequired(required.isEmpty() ? null : required);
     }
 
     private ApiResponses buildResponses(String schemaName, ObjectSchema schema) {

@@ -104,6 +104,31 @@ One endpoint is created per SOAP operation:
 
 Example: `POST /api/Auth/login`.
 
+### Per-operation endpoints: `bridge.operations.*`
+
+Path, HTTP method and presence of single endpoints, by service and operation name (case-insensitive):
+
+```yaml
+bridge:
+  operations:
+    Documents:
+      getDocument:
+        path: /documents/{uuid}   # below path-prefix: GET /api/documents/{uuid}
+        method: GET
+      findDocuments:
+        path: /documents
+        method: GET
+      purge:
+        enabled: false            # no endpoint
+```
+
+- `{name}` path variables fill the request field of that name (`{customer.id}` a nested one); a variable that is
+  not a request field fails the start. Path variables win over the body.
+- `GET` and `DELETE` take the other fields from the query string: `?token=t&version=3`, nested fields as
+  `customer.name=Ann`, arrays as repeated parameters (`tags=a&tags=b`). Swagger shows them as query parameters;
+  arrays of objects and maps have no query form, use `POST` for such operations.
+- Two operations on the same method and path fail the start.
+
 ### Request validation: `bridge.validation.*`
 
 Request bodies are validated against the JSON schema generated from XSD (the same one shown in Swagger)
@@ -147,6 +172,51 @@ bridge:
 
 Basic auth and WS-Security are independent and can be combined. Do not forward `Authorization`
 when `basic-auth` is set: both would write the same header.
+
+#### WSDL behind authentication
+
+`basic-auth` is also used to load the services page, WSDL and XSD; `wsdl-basic-auth` sets other credentials for
+these downloads only:
+
+```yaml
+bridge:
+  backend:
+    wsdl-basic-auth:
+      username: wsdl-reader
+      password: ${WSDL_PASSWORD}
+```
+
+The credentials are sent only in answer to an HTTP `401` challenge, and only to the scheme, host and port of
+`services-url` and the `wsdl-*-url`s; WSDL links of a services page that point elsewhere and external XSDs
+(e.g. `www.w3.org`) never get them. They are served by the JVM-wide `java.net.Authenticator` (CXF has no other
+hook for its WSDL downloads), which delegates every other request to the previously installed one.
+
+#### Endpoint address
+
+The SOAP call goes to the `soap:address` of the WSDL. When the WSDL advertises a host the bridge cannot reach
+(`localhost`, an internal name):
+
+```yaml
+bridge:
+  backend:
+    endpoint-base-url: https://soap-gateway:8443   # replaces scheme, host and port; the WSDL path is kept
+    endpoint-addresses:                            # full address per service (name as in the REST path)
+      Auth: http://auth-backend:9000/services/Auth
+```
+
+`endpoint-addresses` wins over `endpoint-base-url`. Timeouts, Basic auth and WS-Security apply to the new address.
+
+### SOAP headers declared in the WSDL: `bridge.soap-headers.*`
+
+Headers of the binding (`<soap:header message="..." part="..."/>`, also those of another message) are sent from
+the `soapHeaders` request object, one property per header part:
+
+```json
+{"text": "hi", "soapHeaders": {"auth": {"token": "secret"}, "locale": "de"}}
+```
+
+Swagger and validation show them; a header that is not sent is left out of the envelope. The JSON field name is
+`bridge.soap-headers.json-field` (default `soapHeaders`). Response headers are not mapped.
 
 ### Correlation id: `bridge.correlation.*`
 

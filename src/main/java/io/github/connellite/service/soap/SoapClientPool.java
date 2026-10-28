@@ -13,20 +13,16 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 
 /**
- * Dynamic CXF clients, one per WSDL URL. Building a client downloads the WSDL and compiles JAXB classes,
+ * Dynamic CXF clients, one per WSDL URL and endpoint address. Building a client downloads the WSDL and compiles JAXB classes,
  * so clients are cached; idle ones are evicted and, optionally, rebuilt in the background to pick up WSDL changes.
  */
 @Slf4j
 @Component
 public class SoapClientPool implements DisposableBean {
 
-    private final LoadingCache<String, Client> clients;
+    private final LoadingCache<ClientKey, Client> clients;
 
-    public SoapClientPool(
-            BridgeProperties bridgeProperties,
-            SoapClientFactory clientFactory,
-            ObjectProvider<MeterRegistry> meterRegistry
-    ) {
+    public SoapClientPool(BridgeProperties bridgeProperties, SoapClientFactory clientFactory, ObjectProvider<MeterRegistry> meterRegistry) {
         BridgeProperties.ClientPool pool = bridgeProperties.getClientPool();
         Caffeine<Object, Object> builder = Caffeine.newBuilder()
                 .maximumSize(pool.getMaximumSize())
@@ -38,13 +34,20 @@ public class SoapClientPool implements DisposableBean {
             builder.refreshAfterWrite(pool.getRefreshAfterWrite());
         }
         this.clients = builder
-                .<String, Client>removalListener(SoapClientPool::onRemoval)
-                .build(clientFactory::create);
+                .removalListener(SoapClientPool::onRemoval)
+                .build(key -> clientFactory.create(key.wsdlUrl(), key.endpointAddress()));
         meterRegistry.ifAvailable(registry -> CaffeineCacheMetrics.monitor(registry, clients, "soap.clients"));
     }
 
     public Client getClient(String wsdlUrl) {
-        return clients.get(wsdlUrl);
+        return getClient(wsdlUrl, null);
+    }
+
+    /**
+     * @param endpointAddress configured address of the service, {@code null} for the (rebased) WSDL address
+     */
+    public Client getClient(String wsdlUrl, String endpointAddress) {
+        return clients.get(new ClientKey(wsdlUrl, endpointAddress));
     }
 
     @Override
@@ -57,13 +60,16 @@ public class SoapClientPool implements DisposableBean {
      * A client replaced by a background refresh may still serve in-flight calls, so it is left to GC;
      * evicted or invalidated clients are destroyed to release their conduits.
      */
-    private static void onRemoval(String wsdlUrl, Client client, RemovalCause cause) {
-        if (client == null) {
+    private static void onRemoval(ClientKey key, Client client, RemovalCause cause) {
+        if (client == null || key == null) {
             return;
         }
-        log.info("SOAP client for WSDL {} removed from pool ({})", wsdlUrl, cause);
+        log.info("SOAP client for WSDL {} removed from pool ({})", key.wsdlUrl(), cause);
         if (cause != RemovalCause.REPLACED) {
             client.destroy();
         }
+    }
+
+    private record ClientKey(String wsdlUrl, String endpointAddress) {
     }
 }

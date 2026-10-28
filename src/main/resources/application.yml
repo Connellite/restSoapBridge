@@ -38,7 +38,23 @@ bridge:
     #   username: soap-user
     #   password: secret
     #   password-type: digest
+    # credentials for services page / WSDL / XSD downloads (default: basic-auth)
+    # wsdl-basic-auth:
+    #   username: wsdl-reader
+    #   password: secret
+    # replace scheme://host:port of the WSDL soap:address, or set the address per service
+    # endpoint-base-url: http://soap-backend:8080
+    # endpoint-addresses:
+    #   Auth: http://auth-backend:9000/services/Auth
     forward-headers: []
+  # per-operation path / method / enabled
+  # operations:
+  #   Documents:
+  #     getDocument:
+  #       path: /documents/{uuid}
+  #       method: GET
+  soap-headers:
+    json-field: soapHeaders
   errors:
     # HTTP status per SOAP fault name; unlisted faults -> 502
     fault-status:

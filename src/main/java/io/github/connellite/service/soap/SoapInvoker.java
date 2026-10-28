@@ -10,6 +10,7 @@ import io.github.connellite.exception.TypeCoercionException;
 import io.github.connellite.mapper.path.JaxbMaps;
 import io.github.connellite.mapper.path.SoapArgument;
 import io.github.connellite.mapper.path.SoapJsonMapper;
+import io.github.connellite.model.MappingDefinition;
 import io.github.connellite.util.TypeCoercionUtil;
 #if SPRING_BOOT_3
 import jakarta.xml.bind.annotation.XmlElement;
@@ -67,7 +68,20 @@ public class SoapInvoker {
      */
     public Object invoke(String wsdlUrl, String operation, List<SoapArgument> arguments,
                          Map<String, List<String>> backendHeaders) {
-        Client client = client(wsdlUrl);
+        MappingDefinition.SoapTarget target = new MappingDefinition.SoapTarget();
+        target.setWsdl(wsdlUrl);
+        target.setOperation(operation);
+        return invoke(target, arguments, List.of(), backendHeaders);
+    }
+
+    /**
+     * @param headerArguments values of the SOAP header parts the WSDL binding declares, by part name
+     * @param backendHeaders  HTTP headers for the SOAP request, in addition to the correlation id
+     */
+    public Object invoke(MappingDefinition.SoapTarget target, List<SoapArgument> arguments,
+                         List<SoapArgument> headerArguments, Map<String, List<String>> backendHeaders) {
+        String operation = target.getOperation();
+        Client client = client(target.getWsdl(), target.getEndpointAddress());
         BindingOperationInfo operationInfo = findOperation(client, operation);
         if (operationInfo == null) {
             throw UpstreamException.contractMismatch("SOAP operation '" + operation + "' not found in "
@@ -77,7 +91,7 @@ public class SoapInvoker {
         BindingOperationInfo invocable = operationInfo.isUnwrappedCapable()
                 ? operationInfo.getUnwrappedOperation()
                 : operationInfo;
-        Object[] params = convertArguments(operationInfo, invocable, arguments);
+        Object[] params = convertArguments(operationInfo, invocable, arguments, headerArguments);
         try {
             // Per-call request context: the pooled client is shared between threads.
             Map<String, Object> invocationContext = new HashMap<>();
@@ -96,9 +110,9 @@ public class SoapInvoker {
         }
     }
 
-    private Client client(String wsdlUrl) {
+    private Client client(String wsdlUrl, String endpointAddress) {
         try {
-            return clientPool.getClient(wsdlUrl);
+            return clientPool.getClient(wsdlUrl, endpointAddress);
         } catch (RuntimeException exception) {
             throw BackendFailures.clientCreation(wsdlUrl, exception);
         }
@@ -182,7 +196,18 @@ public class SoapInvoker {
      */
     static Object[] convertArguments(BindingOperationInfo operationInfo, BindingOperationInfo invocable,
                                      List<SoapArgument> arguments) {
+        return convertArguments(operationInfo, invocable, arguments, List.of());
+    }
+
+    /**
+     * Body parts come from the binding message; SOAP header parts are the other parts of the operation message
+     * (explicit headers) and its out-of-band parts (implicit headers). CXF takes every part from the parameter
+     * array at the part's index and writes header parts into the SOAP header.
+     */
+    static Object[] convertArguments(BindingOperationInfo operationInfo, BindingOperationInfo invocable,
+                                     List<SoapArgument> arguments, List<SoapArgument> headerArguments) {
         List<MessagePartInfo> parts = invocable.getInput() != null ? invocable.getInput().getMessageParts() : List.of();
+        List<MessagePartInfo> headerParts = headerParts(operationInfo, invocable);
         List<SoapArgument> effectiveArguments = arguments;
         if (!operationInfo.isUnwrappedCapable() && parts.size() == 1 && !hasArgumentFor(arguments, parts.get(0))) {
             // Request element CXF cannot unwrap: the single part is the request bean, built from all fields.
@@ -195,24 +220,35 @@ public class SoapInvoker {
         }
         Class<?> requestWrapper = operationInfo.isUnwrappedCapable() ? requestWrapperClass(operationInfo) : null;
 
-        Object[] params = new Object[parts.size()];
+        Object[] params = new Object[parameterCount(parts, headerParts)];
         List<String> errors = new ArrayList<>();
         for (int index = 0; index < parts.size(); index++) {
             MessagePartInfo part = parts.get(index);
             SoapArgument argument = argumentsByName.remove(normalizeName(partName(part)));
-            if (argument == null) {
-                continue;
+            if (argument != null) {
+                convertPart(argument, parameter(part, requestWrapper), parameterIndex(part, index, headerParts),
+                        params, errors);
             }
-            ParameterDescriptor parameter = parameter(part, requestWrapper);
-            try {
-                params[index] = convertArgument(argument.value(), parameter);
-            } catch (IllegalArgumentException exception) {
-                errors.add(conversionError(argument, parameter, NestedExceptionUtils.getMostSpecificCause(exception).getMessage()));
-                continue;
+        }
+
+        Map<String, SoapArgument> headersByName = new LinkedHashMap<>();
+        for (SoapArgument argument : headerArguments) {
+            headersByName.put(normalizeName(argument.name()), argument);
+        }
+        for (MessagePartInfo part : headerParts) {
+            SoapArgument argument = headersByName.remove(normalizeName(partName(part)));
+            if (argument != null) {
+                convertPart(argument, parameter(part, null), part.getIndex(), params, errors);
             }
-            if (!isAcceptable(params[index], parameter)) {
-                errors.add(conversionError(argument, parameter, null));
-            }
+        }
+        List<String> unknownHeaders = headersByName.values().stream()
+                .filter(argument -> argument.value() != null)
+                .map(SoapArgument::name)
+                .toList();
+        if (!unknownHeaders.isEmpty()) {
+            errors.add("Unknown SOAP header(s) " + unknownHeaders + " for SOAP operation '"
+                    + operationInfo.getName().getLocalPart() + "'; expected "
+                    + headerParts.stream().map(SoapInvoker::partName).toList());
         }
 
         // Mappings list every XSD field, so absent (null) extras are harmless; a sent value must find its part.
@@ -232,6 +268,63 @@ public class SoapInvoker {
             log.debug("Invoking SOAP operation '{}' with {}", operationInfo.getName().getLocalPart(), describe(parts, params));
         }
         return params;
+    }
+
+    private static void convertPart(SoapArgument argument, ParameterDescriptor parameter, int index,
+                                    Object[] params, List<String> errors) {
+        try {
+            params[index] = convertArgument(argument.value(), parameter);
+        } catch (IllegalArgumentException exception) {
+            errors.add(conversionError(argument, parameter, NestedExceptionUtils.getMostSpecificCause(exception).getMessage()));
+            return;
+        }
+        if (!isAcceptable(params[index], parameter)) {
+            errors.add(conversionError(argument, parameter, null));
+        }
+    }
+
+    /**
+     * Parts of the operation's input that the binding does not put into the body. An unwrapped operation may not
+     * repeat the out-of-band (implicit header) parts of the wrapped one, so those are taken from both.
+     */
+    static List<MessagePartInfo> headerParts(BindingOperationInfo operationInfo, BindingOperationInfo invocable) {
+        List<MessagePartInfo> bodyParts = invocable.getInput() != null ? invocable.getInput().getMessageParts() : List.of();
+        List<MessagePartInfo> candidates = new ArrayList<>();
+        if (invocable.getOperationInfo().getInput() != null) {
+            candidates.addAll(invocable.getOperationInfo().getInput().getMessageParts());
+            candidates.addAll(invocable.getOperationInfo().getInput().getOutOfBandParts());
+        }
+        if (invocable != operationInfo && operationInfo.getOperationInfo().getInput() != null) {
+            candidates.addAll(operationInfo.getOperationInfo().getInput().getOutOfBandParts());
+        }
+        List<MessagePartInfo> headers = new ArrayList<>();
+        for (MessagePartInfo part : candidates) {
+            boolean known = bodyParts.stream().anyMatch(body -> body.getName().equals(part.getName()))
+                    || headers.stream().anyMatch(header -> header.getName().equals(part.getName()));
+            if (!known) {
+                headers.add(part);
+            }
+        }
+        return headers;
+    }
+
+    private static int parameterCount(List<MessagePartInfo> bodyParts, List<MessagePartInfo> headerParts) {
+        int count = bodyParts.size();
+        if (headerParts.isEmpty()) {
+            return count;
+        }
+        for (MessagePartInfo part : bodyParts) {
+            count = Math.max(count, part.getIndex() + 1);
+        }
+        for (MessagePartInfo part : headerParts) {
+            count = Math.max(count, part.getIndex() + 1);
+        }
+        return count;
+    }
+
+    /** Without headers the body parts are the parameters in order; with headers every part sits at its index. */
+    private static int parameterIndex(MessagePartInfo part, int position, List<MessagePartInfo> headerParts) {
+        return headerParts.isEmpty() ? position : part.getIndex();
     }
 
     private static boolean hasArgumentFor(List<SoapArgument> arguments, MessagePartInfo part) {

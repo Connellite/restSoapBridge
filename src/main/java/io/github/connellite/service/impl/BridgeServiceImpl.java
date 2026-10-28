@@ -29,7 +29,8 @@ public class BridgeServiceImpl implements BridgeService {
         requestSchemaValidator.validate(mapping, requestBody);
         MappingDefinition.SoapTarget soap = mapping.getSoap();
         List<SoapArgument> arguments = PathResolver.buildSoapArguments(mapping.getRequest(), requestBody);
-        Object soapResult = soapInvoker.invoke(soap.getWsdl(), soap.getOperation(), arguments, backendHeaders);
+        List<SoapArgument> headers = PathResolver.buildSoapHeaderArguments(mapping.getHeaderRequest(), requestBody);
+        Object soapResult = soapInvoker.invoke(soap, arguments, headers, backendHeaders);
         return toJsonBody(mapping, soapResult);
     }
 

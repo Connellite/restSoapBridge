@@ -5,16 +5,22 @@ import io.github.connellite.config.WsdlUrlCollector;
 import io.github.connellite.model.DiscoveredSoapService;
 import io.github.connellite.model.MappingDefinition;
 import io.github.connellite.model.SchemaField;
+import io.github.connellite.model.SoapHeaderModel;
 import io.github.connellite.model.WsdlOperationModel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @Slf4j
@@ -23,6 +29,8 @@ import java.util.regex.Pattern;
 public class AutoMappingGenerator {
 
     private static final Pattern SPEL_IDENTIFIER = Pattern.compile("[A-Za-z_$][A-Za-z0-9_$]*");
+    private static final Pattern PATH_VARIABLE = Pattern.compile("\\{([^{}/]+)}");
+    private static final Set<String> SUPPORTED_METHODS = new LinkedHashSet<>(List.of("GET", "POST", "PUT", "PATCH", "DELETE"));
 
     private final BridgeProperties bridgeProperties;
     private final WsdlServiceDiscovery serviceDiscovery;
@@ -35,12 +43,63 @@ public class AutoMappingGenerator {
 
         for (DiscoveredSoapService service : services) {
             for (WsdlOperationModel operation : service.operations()) {
-                mappings.add(toMapping(service, operation, auto));
+                BridgeProperties.OperationOverride override = bridgeProperties.operation(service.name(), operation.name());
+                if (!override.isEnabled()) {
+                    log.info("Operation {}.{} is disabled by bridge.operations", service.name(), operation.name());
+                    continue;
+                }
+                MappingDefinition mapping = toMapping(service, operation, auto);
+                applyOverride(mapping, override, auto);
+                mappings.add(mapping);
             }
         }
 
         log.info("Generated {} automatic mapping(s)", mappings.size());
         return mappings;
+    }
+
+    /**
+     * {@code bridge.operations.<Service>.<operation>}: own path below the prefix and HTTP method. Path variables
+     * fill request fields, so each must name one: a typo fails the start instead of every request.
+     */
+    private static void applyOverride(MappingDefinition mapping, BridgeProperties.OperationOverride override,
+                                      BridgeProperties.AutoMapping auto) {
+        String name = "bridge.operations." + mapping.getSoap().getService() + "." + mapping.getSoap().getOperation();
+        if (StringUtils.hasText(override.getMethod())) {
+            String method = override.getMethod().trim().toUpperCase(Locale.ROOT);
+            if (!SUPPORTED_METHODS.contains(method)) {
+                throw new IllegalStateException(name + ".method: unsupported HTTP method " + override.getMethod()
+                        + ", expected one of " + SUPPORTED_METHODS);
+            }
+            mapping.setMethod(method);
+        }
+        if (StringUtils.hasText(override.getPath())) {
+            String path = BridgeProperties.normalizePathPrefix(override.getPath());
+            if (path.isEmpty()) {
+                throw new IllegalStateException(name + ".path must not be the root path");
+            }
+            mapping.setPath(BridgeProperties.normalizePathPrefix(auto.getPathPrefix()) + path);
+        }
+        Set<String> requestFields = new LinkedHashSet<>();
+        mapping.getRequest().keySet().forEach(field -> requestFields.add(topLevelField(field.substring(2))));
+        for (String variable : pathVariables(mapping.getPath())) {
+            if (!requestFields.contains(topLevelField(variable))) {
+                throw new IllegalStateException(name + ".path: variable {" + variable
+                        + "} is not a request field of the operation; fields: " + requestFields);
+            }
+        }
+    }
+
+    /** Names of {@code {name}} / {@code {name:regex}} segments of an Ant-style path. */
+    public static List<String> pathVariables(String path) {
+        List<String> variables = new ArrayList<>();
+        Matcher matcher = PATH_VARIABLE.matcher(path);
+        while (matcher.find()) {
+            String variable = matcher.group(1);
+            int colon = variable.indexOf(':');
+            variables.add(colon >= 0 ? variable.substring(0, colon) : variable);
+        }
+        return variables;
     }
 
     private MappingDefinition toMapping(
@@ -56,6 +115,7 @@ public class AutoMappingGenerator {
         soap.setService(service.name());
         soap.setOperation(operation.name());
         soap.setWsdl(service.wsdlUrl());
+        soap.setEndpointAddress(bridgeProperties.getBackend().endpointAddress(service.name()));
         mapping.setSoap(soap);
 
         Map<String, String> request = new LinkedHashMap<>();
@@ -74,12 +134,41 @@ public class AutoMappingGenerator {
             }
             requestSchemaPaths.add(toRestJsonPath(field));
         }
+        List<SchemaField> requestSchemaFields = new ArrayList<>(operation.inputSchemaFields().stream()
+                .filter(field -> !isJaxbMapEntryField(field.path()))
+                .toList());
+
+        Map<String, String> headerRequest = new LinkedHashMap<>();
+        String headerRoot = bridgeProperties.getSoapHeaders().getJsonField();
+        if (!operation.inputHeaders().isEmpty() && request.keySet().stream()
+                .anyMatch(field -> topLevelField(field.substring(2)).equals(headerRoot))) {
+            log.warn("Operation {}.{} has a request field '{}' that is also bridge.soap-headers.json-field; "
+                    + "SOAP headers shadow it", service.name(), operation.name(), headerRoot);
+        }
+        for (SoapHeaderModel header : operation.inputHeaders()) {
+            for (SchemaField field : headerFields(header)) {
+                String headerField = field.path().isEmpty() || field.path().startsWith("[")
+                        ? header.part() + field.path()
+                        : header.part() + "." + field.path();
+                String restField = headerRoot + "." + headerField;
+                if (isJaxbMapEntryField(headerField)) {
+                    continue;
+                }
+                if (!isCollectionItemField(headerField)) {
+                    String soapField = headerField.endsWith("[]")
+                            ? headerField.substring(0, headerField.length() - 2)
+                            : headerField;
+                    headerRequest.put(toRestJsonPath(restField), "$." + soapField);
+                }
+                requestSchemaPaths.add(toRestJsonPath(restField));
+                // A header is optional as a whole, so none of its fields is required.
+                requestSchemaFields.add(new SchemaField(restField, field.xsdType(), false, field.collection(),
+                        field.facets()));
+            }
+        }
+        mapping.setHeaderRequest(headerRequest);
         mapping.setRequestSchemaPaths(requestSchemaPaths);
-        mapping.setRequestSchemaFields(toRestSchemaFields(
-                operation.inputSchemaFields().stream()
-                        .filter(field -> !isJaxbMapEntryField(field.path()))
-                        .toList()
-        ));
+        mapping.setRequestSchemaFields(toRestSchemaFields(requestSchemaFields));
 
         Map<String, String> response = new LinkedHashMap<>();
         String payloadWrapperField = payloadWrapperField(operation);
@@ -120,6 +209,13 @@ public class AutoMappingGenerator {
                         field.facets()
                 ))
                 .toList();
+    }
+
+    /** A header element without indexed fields (e.g. {@code xs:any} content) is passed on as a whole object. */
+    private static List<SchemaField> headerFields(SoapHeaderModel header) {
+        return header.schemaFields().isEmpty()
+                ? List.of(new SchemaField("", "object", false, false))
+                : header.schemaFields();
     }
 
     private static boolean isCollectionItemField(String field) {

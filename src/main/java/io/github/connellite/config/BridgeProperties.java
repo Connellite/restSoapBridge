@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 @Getter
 @Setter
@@ -21,6 +22,54 @@ public class BridgeProperties {
     private Backend backend = new Backend();
     private Correlation correlation = new Correlation();
     private Errors errors = new Errors();
+    private SoapHeaders soapHeaders = new SoapHeaders();
+    /**
+     * Per-operation overrides of the generated endpoint, by service and operation name (matched ignoring case):
+     * {@code bridge.operations.Auth.login.path=/session}.
+     */
+    private Map<String, Map<String, OperationOverride>> operations = new LinkedHashMap<>();
+
+    /** The override of {@code service.operation}, or an empty one. */
+    public OperationOverride operation(String service, String operation) {
+        return findIgnoringCase(operations, service)
+                .flatMap(byOperation -> findIgnoringCase(byOperation, operation))
+                .orElseGet(OperationOverride::new);
+    }
+
+    private static <V> Optional<V> findIgnoringCase(Map<String, V> values, String key) {
+        if (values == null || key == null) {
+            return Optional.empty();
+        }
+        V exact = values.get(key);
+        if (exact != null) {
+            return Optional.of(exact);
+        }
+        return values.entrySet().stream()
+                .filter(entry -> entry.getKey().equalsIgnoreCase(key))
+                .map(Map.Entry::getValue)
+                .findFirst();
+    }
+
+    @Getter
+    @Setter
+    public static class OperationOverride {
+        /** Replaces {@code /{Service}/{operation}} below the path prefix; may hold variables: {@code /docs/{uuid}}. */
+        private String path;
+        /** HTTP method of this endpoint instead of {@code bridge.auto.http-method}. */
+        private String method;
+        /** {@code false}: no endpoint for this operation. */
+        private boolean enabled = true;
+    }
+
+    /**
+     * SOAP headers declared in the WSDL binding ({@code soap:header}) are sent from this request JSON object,
+     * one property per header part: {@code {"soapHeaders": {"auth": {"token": "..."}}}}.
+     */
+    @Getter
+    @Setter
+    public static class SoapHeaders {
+        private String jsonField = "soapHeaders";
+    }
 
     @Getter
     @Setter
@@ -81,9 +130,29 @@ public class BridgeProperties {
     @Setter
     public static class Backend {
         private BasicAuth basicAuth = new BasicAuth();
+        /**
+         * Credentials for the services page, WSDL and XSD downloads; {@code basic-auth} when not set.
+         * Sent only to the scheme/host/port of {@code services-url} and the {@code wsdl-*-url}s.
+         */
+        private BasicAuth wsdlBasicAuth = new BasicAuth();
         private WsSecurity wsSecurity = new WsSecurity();
         /** REST request headers copied to the SOAP HTTP request, e.g. {@code Authorization}, {@code Accept-Language}. */
         private List<String> forwardHeaders = new ArrayList<>();
+        /**
+         * Replaces scheme, host and port of the WSDL {@code soap:address} (the path is kept), e.g. when the WSDL
+         * advertises {@code localhost} or an internal host name.
+         */
+        private String endpointBaseUrl;
+        /** Full SOAP endpoint address by service name (as in the REST path); wins over {@code endpoint-base-url}. */
+        private Map<String, String> endpointAddresses = new LinkedHashMap<>();
+
+        public BasicAuth effectiveWsdlBasicAuth() {
+            return wsdlBasicAuth.isConfigured() ? wsdlBasicAuth : basicAuth;
+        }
+
+        public String endpointAddress(String service) {
+            return findIgnoringCase(endpointAddresses, service).filter(address -> !address.isBlank()).orElse(null);
+        }
     }
 
     @Getter

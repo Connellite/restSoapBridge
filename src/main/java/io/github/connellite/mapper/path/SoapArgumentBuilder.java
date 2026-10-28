@@ -35,6 +35,21 @@ public class SoapArgumentBuilder {
         return toOrderedArguments(soapRoot);
     }
 
+    /**
+     * One argument per top-level SOAP path segment, without unwrapping a single root: used for SOAP header parts,
+     * where {@code $.auth.token} must stay the {@code auth} part even when it is the only one.
+     */
+    public static List<SoapArgument> buildParts(Map<String, String> requestMappings, JsonNode body) {
+        Map<String, Object> soapRoot = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : requestMappings.entrySet()) {
+            Object value = JsonPathReader.read(body, entry.getKey());
+            if (value != null) {
+                setNestedValue(soapRoot, entry.getValue(), value);
+            }
+        }
+        return toOrderedArguments(soapRoot);
+    }
+
     @SuppressWarnings("unchecked")
     private static void setNestedValue(Map<String, Object> root, String jsonPath, Object value) {
         String relative = JsonPathWriter.toRelativePath(jsonPath);

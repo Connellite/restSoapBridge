@@ -30,4 +30,8 @@ public final class PathResolver {
     public static List<SoapArgument> buildSoapArguments(Map<String, String> requestMappings, JsonNode body) {
         return SoapArgumentBuilder.build(requestMappings, body);
     }
+
+    public static List<SoapArgument> buildSoapHeaderArguments(Map<String, String> headerMappings, JsonNode body) {
+        return SoapArgumentBuilder.buildParts(headerMappings, body);
+    }
 }

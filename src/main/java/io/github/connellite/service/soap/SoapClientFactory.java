@@ -6,33 +6,83 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.cxf.configuration.security.AuthorizationPolicy;
 import org.apache.cxf.endpoint.Client;
 import org.apache.cxf.jaxws.endpoint.dynamic.JaxWsDynamicClientFactory;
+import org.apache.cxf.service.model.EndpointInfo;
 import org.apache.cxf.transport.http.HTTPConduit;
 import org.apache.cxf.transports.http.configuration.HTTPClientPolicy;
 import org.apache.cxf.ws.security.wss4j.WSS4JOutInterceptor;
 import org.apache.wss4j.common.ConfigurationConstants;
 import org.apache.wss4j.common.ext.WSPasswordCallback;
+import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 
 import javax.security.auth.callback.Callback;
 import javax.security.auth.callback.CallbackHandler;
+import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Builds dynamic CXF clients configured for the backend: timeouts, HTTP Basic auth and WS-Security UsernameToken.
+ * Builds dynamic CXF clients configured for the backend: endpoint address, timeouts, HTTP Basic auth and
+ * WS-Security UsernameToken.
  */
 @Slf4j
 @Component
+@DependsOn("wsdlAuthenticator")
 @RequiredArgsConstructor
 public class SoapClientFactory {
 
     private final BridgeProperties bridgeProperties;
 
     public Client create(String wsdlUrl) {
+        return create(wsdlUrl, null);
+    }
+
+    /**
+     * @param endpointAddress SOAP endpoint address of this service ({@code bridge.backend.endpoint-addresses});
+     *                        {@code null}: the WSDL {@code soap:address}, rebased on {@code endpoint-base-url}
+     */
+    public Client create(String wsdlUrl, String endpointAddress) {
         log.info("Creating dynamic SOAP client for WSDL: {}", wsdlUrl);
         Client client = JaxWsDynamicClientFactory.newInstance().createClient(wsdlUrl);
+        // Before configure(): the conduit takes its target address from the endpoint when it is created.
+        overrideAddress(client, endpointAddress);
         configure(client);
         return client;
+    }
+
+    private void overrideAddress(Client client, String endpointAddress) {
+        EndpointInfo endpoint = client.getEndpoint().getEndpointInfo();
+        String wsdlAddress = endpoint.getAddress();
+        String address = endpointAddress != null
+                ? endpointAddress
+                : rebase(wsdlAddress, bridgeProperties.getBackend().getEndpointBaseUrl());
+        if (address != null && !address.equals(wsdlAddress)) {
+            endpoint.setAddress(address);
+            log.info("SOAP endpoint {} instead of WSDL address {}", address, wsdlAddress);
+        }
+    }
+
+    /** Scheme, host and port of {@code baseUrl} with the path and query of {@code address}. */
+    static String rebase(String address, String baseUrl) {
+        if (!StringUtils.hasText(baseUrl) || !StringUtils.hasText(address)) {
+            return address;
+        }
+        URI original = URI.create(address.trim());
+        URI base = URI.create(baseUrl.trim());
+        StringBuilder rebased = new StringBuilder(base.getScheme()).append("://").append(base.getRawAuthority());
+        String basePath = base.getRawPath() != null ? base.getRawPath() : "";
+        while (basePath.endsWith("/")) {
+            basePath = basePath.substring(0, basePath.length() - 1);
+        }
+        rebased.append(basePath);
+        if (original.getRawPath() != null) {
+            rebased.append(original.getRawPath());
+        }
+        if (original.getRawQuery() != null) {
+            rebased.append('?').append(original.getRawQuery());
+        }
+        return rebased.toString();
     }
 
     void configure(Client client) {
