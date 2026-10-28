@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.networknt.schema.JsonSchema;
 import com.networknt.schema.JsonSchemaFactory;
+import com.networknt.schema.PathType;
 import com.networknt.schema.SchemaValidatorsConfig;
 import com.networknt.schema.SpecVersion;
 import com.networknt.schema.ValidationMessage;
@@ -43,9 +44,13 @@ public class RequestSchemaValidator {
     );
 
     private static final JsonSchemaFactory SCHEMA_FACTORY = JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V7);
-    /** Messages are part of the API response: English whatever the default locale of the JVM. */
+    /**
+     * Messages are part of the API response: English whatever the default locale of the JVM, with
+     * {@code $.field} paths as without a config.
+     */
     private static final SchemaValidatorsConfig SCHEMA_CONFIG = SchemaValidatorsConfig.builder()
             .locale(Locale.ENGLISH)
+            .pathType(PathType.LEGACY)
             .build();
 
     private final BridgeProperties bridgeProperties;
