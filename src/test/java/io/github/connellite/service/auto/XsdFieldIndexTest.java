@@ -70,16 +70,60 @@ class XsdFieldIndexTest {
         ), fields.get(new QName("urn:test", "createOrder")));
 
         Map<QName, List<SchemaField>> schemaFields = XsdFieldIndex.readElementSchemaFields(definition);
+        SchemaField.ChoiceRef email = new SchemaField.ChoiceRef("#choice5", 0, 0, false);
+        SchemaField.ChoiceRef phone = new SchemaField.ChoiceRef("#choice5", 1, 0, false);
         assertEquals(List.of(
                 new SchemaField("customer.name", "string", true, false),
                 new SchemaField("customer.phone", "string", true, false),
-                new SchemaField("products[]", "object", true, true),
+                new SchemaField("products[]", "object", true, true, null, false, 1, null, null, List.of()),
                 new SchemaField("products[].sku", "string", true, false),
                 new SchemaField("products[].qty", "int", true, false),
-                new SchemaField("email", "string", false, false),
-                new SchemaField("phoneContact", "string", false, false),
+                new SchemaField("email", "string", false, false).withChoice(email),
+                new SchemaField("phoneContact", "string", false, false).withChoice(phone),
                 new SchemaField("externalId", "string", true, false)
         ), schemaFields.get(new QName("urn:test", "createOrder")));
+    }
+
+    @Test
+    void readElementSchemaFields_carriesNillableOccursDocumentationAndNestedChoices() throws Exception {
+        Definition definition = definitionWithSchema("""
+                <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+                           targetNamespace="urn:test" elementFormDefault="qualified">
+                  <xs:element name="pay">
+                    <xs:complexType>
+                      <xs:sequence>
+                        <xs:element name="note" type="xs:string" nillable="true">
+                          <xs:annotation><xs:documentation>
+                            Free text,
+                            shown to the payee.
+                          </xs:documentation></xs:annotation>
+                        </xs:element>
+                        <xs:element name="tags" type="xs:string" minOccurs="2" maxOccurs="5"/>
+                        <xs:choice minOccurs="0">
+                          <xs:element name="card" type="xs:string"/>
+                          <xs:sequence>
+                            <xs:element name="iban" type="xs:string"/>
+                            <xs:element name="bic" type="xs:string" minOccurs="0"/>
+                          </xs:sequence>
+                        </xs:choice>
+                      </xs:sequence>
+                    </xs:complexType>
+                  </xs:element>
+                </xs:schema>
+                """);
+
+        List<SchemaField> fields = XsdFieldIndex.readElementSchemaFields(definition).get(new QName("urn:test", "pay"));
+
+        SchemaField.ChoiceRef card = new SchemaField.ChoiceRef("#choice2", 0, 0, true);
+        SchemaField.ChoiceRef account = new SchemaField.ChoiceRef("#choice2", 1, 0, true);
+        assertEquals(List.of(
+                new SchemaField("note", "string", true, false, null, true, null, null,
+                        "Free text,\nshown to the payee.", List.of()),
+                new SchemaField("tags[]", "string", true, true, null, false, 2, 5, null, List.of()),
+                new SchemaField("card", "string", false, false).withChoice(card),
+                new SchemaField("iban", "string", false, false).withChoice(account),
+                new SchemaField("bic", "string", false, false).withChoice(account)
+        ), fields);
     }
 
     @Test

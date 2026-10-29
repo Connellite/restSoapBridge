@@ -81,7 +81,7 @@ public class SoapInvoker {
     public Object invoke(MappingDefinition.SoapTarget target, List<SoapArgument> arguments,
                          List<SoapArgument> headerArguments, Map<String, List<String>> backendHeaders) {
         String operation = target.getOperation();
-        Client client = client(target.getWsdl(), target.getEndpointAddress());
+        Client client = client(target);
         BindingOperationInfo operationInfo = findOperation(client, operation);
         if (operationInfo == null) {
             throw UpstreamException.contractMismatch("SOAP operation '" + operation + "' not found in "
@@ -110,11 +110,11 @@ public class SoapInvoker {
         }
     }
 
-    private Client client(String wsdlUrl, String endpointAddress) {
+    private Client client(MappingDefinition.SoapTarget target) {
         try {
-            return clientPool.getClient(wsdlUrl, endpointAddress);
+            return clientPool.getClient(target.getWsdl(), target.getEndpoint(), target.getEndpointAddress());
         } catch (RuntimeException exception) {
-            throw BackendFailures.clientCreation(wsdlUrl, exception);
+            throw BackendFailures.clientCreation(target.getWsdl(), exception);
         }
     }
 

@@ -2,6 +2,7 @@ package io.github.connellite.config;
 
 import io.github.connellite.model.MappingDefinition;
 import io.github.connellite.model.MappingRegistry;
+import io.github.connellite.model.SoapFaultModel;
 import io.github.connellite.service.auto.AutoMappingGenerator;
 import io.swagger.v3.oas.models.Components;
 import io.swagger.v3.oas.models.OpenAPI;
@@ -10,7 +11,9 @@ import io.swagger.v3.oas.models.PathItem;
 import io.swagger.v3.oas.models.Paths;
 import io.swagger.v3.oas.models.info.Info;
 import io.swagger.v3.oas.models.media.ArraySchema;
+import io.swagger.v3.oas.models.media.ComposedSchema;
 import io.swagger.v3.oas.models.media.Content;
+import io.swagger.v3.oas.models.media.IntegerSchema;
 import io.swagger.v3.oas.models.media.MediaType;
 import io.swagger.v3.oas.models.media.ObjectSchema;
 import io.swagger.v3.oas.models.media.Schema;
@@ -22,8 +25,8 @@ import io.swagger.v3.oas.models.parameters.RequestBody;
 import io.swagger.v3.oas.models.responses.ApiResponse;
 import io.swagger.v3.oas.models.responses.ApiResponses;
 import io.swagger.v3.oas.models.tags.Tag;
-import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.info.BuildProperties;
 import org.springframework.stereotype.Component;
 
@@ -34,6 +37,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.regex.Pattern;
 
 import static io.github.connellite.config.OpenApiExampleFactory.exampleMap;
@@ -41,15 +45,30 @@ import static io.github.connellite.config.OpenApiExampleFactory.extractBodyField
 import static io.github.connellite.config.OpenApiExampleFactory.schemaWithXsdExamples;
 
 @Component
-@RequiredArgsConstructor
 public class BridgeOpenApiBuilder {
 
     private static final Pattern INVALID_COMPONENT_KEY_CHARS = Pattern.compile("[^a-zA-Z0-9._-]");
     private static final Set<String> QUERY_METHODS = Set.of("GET", "DELETE");
 
+    /** Media type of the error bodies (problem-spring-web). */
+    static final String PROBLEM_JSON = "application/problem+json";
+
     private final MappingRegistry mappingRegistry;
     private final ObjectProvider<BuildProperties> buildProperties;
+    private final BridgeProperties bridgeProperties;
     private volatile OpenAPI cachedOpenApi;
+
+    public BridgeOpenApiBuilder(MappingRegistry mappingRegistry, ObjectProvider<BuildProperties> buildProperties) {
+        this(mappingRegistry, buildProperties, new BridgeProperties());
+    }
+
+    @Autowired
+    public BridgeOpenApiBuilder(MappingRegistry mappingRegistry, ObjectProvider<BuildProperties> buildProperties,
+                                BridgeProperties bridgeProperties) {
+        this.mappingRegistry = mappingRegistry;
+        this.buildProperties = buildProperties;
+        this.bridgeProperties = bridgeProperties;
+    }
 
     public OpenAPI build() {
         OpenAPI local = cachedOpenApi;
@@ -83,13 +102,15 @@ public class BridgeOpenApiBuilder {
             ObjectSchema responseSchema = schemaWithXsdExamples(mapping.getResponseSchemaFields(), responsePaths);
             schemas.put(requestSchemaName, requestSchema);
             schemas.put(responseSchemaName, responseSchema);
+            Map<String, ObjectSchema> faultSchemas = faultSchemas(mapping);
+            schemas.putAll(faultSchemas);
 
             Operation operation = new Operation()
                     //.operationId(buildOperationId(mapping))
                     .tags(List.of(service))
                     .summary(mapping.getSoap().getOperation())
                     .description(buildDescription(mapping))
-                    .responses(buildResponses(responseSchemaName, responseSchema));
+                    .responses(buildResponses(responseSchemaName, responseSchema, mapping, faultSchemas));
             List<String> pathVariables = AutoMappingGenerator.pathVariables(mapping.getPath());
             pathVariables.forEach(variable -> operation.addParametersItem(new PathParameter()
                     .name(variable)
@@ -209,6 +230,73 @@ public class BridgeOpenApiBuilder {
         schema.setRequired(required.isEmpty() ? null : required);
     }
 
+    /**
+     * One problem schema per declared fault, as {@code GlobalExceptionHandler} writes it: {@code faultName} fixed
+     * to the fault, {@code faultInfo} shaped like the fault detail element.
+     */
+    private static Map<String, ObjectSchema> faultSchemas(MappingDefinition mapping) {
+        Map<String, ObjectSchema> schemas = new LinkedHashMap<>();
+        for (SoapFaultModel fault : mapping.getFaults() != null ? mapping.getFaults() : List.<SoapFaultModel>of()) {
+            ObjectSchema faultInfo = schemaWithXsdExamples(fault.schemaFields(), List.of());
+            ObjectSchema problem = new ObjectSchema();
+            problem.addProperty("title", new StringSchema());
+            problem.addProperty("status", new IntegerSchema());
+            problem.addProperty("detail", new StringSchema());
+            problem.addProperty("faultName", new StringSchema()._enum(List.of(fault.name())));
+            problem.addProperty("faultInfo", faultInfo);
+            problem.addProperty("correlationId", new StringSchema());
+            problem.setRequired(List.of("faultName"));
+            problem.setDescription(fault.documentation() != null
+                    ? fault.documentation()
+                    : "SOAP fault " + fault.name() + " declared in the WSDL");
+            Map<String, Object> example = new LinkedHashMap<>();
+            example.put("title", "SOAP Fault");
+            example.put("faultName", fault.name());
+            example.put("faultInfo", faultInfo.getExample());
+            problem.setExample(example);
+            schemas.put(schemaName(mapping, "Fault_" + fault.name()), problem);
+        }
+        return schemas;
+    }
+
+    private int faultStatus(String faultName) {
+        Map<String, Integer> configured = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        configured.putAll(bridgeProperties.getErrors().getFaultStatus());
+        Integer status = configured.get(faultName);
+        return status != null ? status : 502;
+    }
+
+    @SuppressWarnings("rawtypes")
+    private ApiResponses buildResponses(String schemaName, ObjectSchema schema, MappingDefinition mapping,
+                                        Map<String, ObjectSchema> faultSchemas) {
+        ApiResponses responses = buildResponses(schemaName, schema);
+        Map<Integer, List<String>> faultsByStatus = new TreeMap<>();
+        for (String faultSchemaName : faultSchemas.keySet()) {
+            String faultName = String.valueOf(faultSchemas.get(faultSchemaName).getProperties().get("faultName")
+                    .getEnum().get(0));
+            faultsByStatus.computeIfAbsent(faultStatus(faultName), status -> new ArrayList<>()).add(faultSchemaName);
+        }
+        faultsByStatus.forEach((status, names) -> {
+            List<Schema> refs = names.stream()
+                    .map(name -> (Schema) new Schema<>().$ref("#/components/schemas/" + name))
+                    .toList();
+            Schema<?> faultSchema = refs.size() == 1 ? refs.get(0) : new ComposedSchema().oneOf(refs);
+            String faults = "Declared SOAP fault(s): " + String.join(", ", names.stream()
+                    .map(name -> name.substring(name.lastIndexOf("Fault_") + "Fault_".length())).toList());
+            ApiResponse response = responses.get(String.valueOf(status));
+            if (response == null) {
+                response = new ApiResponse().description(faults);
+                responses.addApiResponse(String.valueOf(status), response);
+            } else {
+                response.setDescription(response.getDescription() + ". " + faults);
+            }
+            Content content = response.getContent() != null ? response.getContent() : new Content();
+            content.addMediaType(PROBLEM_JSON, new MediaType().schema(faultSchema));
+            response.setContent(content);
+        });
+        return responses;
+    }
+
     private ApiResponses buildResponses(String schemaName, ObjectSchema schema) {
         Map<String, Object> example = schema.getExample() instanceof Map<?, ?> map
                 ? castExample(map)
@@ -231,7 +319,11 @@ public class BridgeOpenApiBuilder {
     }
 
     private String buildDescription(MappingDefinition mapping) {
-        StringBuilder description = new StringBuilder("SOAP service: ")
+        StringBuilder description = new StringBuilder();
+        if (mapping.getDocumentation() != null) {
+            description.append(mapping.getDocumentation()).append("\n\n");
+        }
+        description.append("SOAP service: ")
                 .append(mapping.getSoap().getService())
                 .append(", WSDL: ")
                 .append(mapping.getSoap().getWsdl());

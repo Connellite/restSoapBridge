@@ -1,7 +1,9 @@
 package io.github.connellite.exception;
 
+import io.github.connellite.config.BridgeProperties;
 import io.github.connellite.correlation.CorrelationId;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -28,6 +30,17 @@ public class GlobalExceptionHandler implements ProblemHandling {
     private static final Map<Integer, Status> STATUSES = Arrays.stream(Status.values())
             .collect(Collectors.toUnmodifiableMap(Status::getStatusCode, Function.identity()));
 
+    private final boolean exposeBackendDetails;
+
+    public GlobalExceptionHandler() {
+        this(new BridgeProperties());
+    }
+
+    @Autowired
+    public GlobalExceptionHandler(BridgeProperties bridgeProperties) {
+        this.exposeBackendDetails = bridgeProperties.getErrors().isExposeBackendDetails();
+    }
+
     @ExceptionHandler
     public ResponseEntity<Problem> handleRequestValidation(RequestValidationException exception, NativeWebRequest request) {
         Problem problem = Problem.builder()
@@ -39,17 +52,22 @@ public class GlobalExceptionHandler implements ProblemHandling {
         return create(exception, problem, request);
     }
 
+    /**
+     * The declared fault ({@code faultName}, {@code faultInfo}) is part of the WSDL contract and always shown;
+     * the fault string, code and subcodes only with {@code bridge.errors.expose-backend-details}: they may carry
+     * class names, internal host names or stack traces of the backend.
+     */
     @ExceptionHandler
     public ResponseEntity<Problem> handleSoapFault(SoapFaultException exception, NativeWebRequest request) {
         ProblemBuilder builder = Problem.builder()
                 .withTitle(exception.getTitle())
                 .withStatus(statusOf(exception.getHttpStatus()))
-                .withDetail(exception.getMessage())
+                .withDetail(exposeBackendDetails ? exception.getMessage() : hiddenFaultDetail(exception))
                 .with("faultName", exception.getFaultName());
-        if (exception.getFaultCode() != null) {
+        if (exposeBackendDetails && exception.getFaultCode() != null) {
             builder.with("faultCode", exception.getFaultCode());
         }
-        if (!exception.getFaultSubcodes().isEmpty()) {
+        if (exposeBackendDetails && !exception.getFaultSubcodes().isEmpty()) {
             builder.with("faultSubcodes", exception.getFaultSubcodes());
         }
         if (exception.getFaultInfo() != null) {
@@ -58,14 +76,23 @@ public class GlobalExceptionHandler implements ProblemHandling {
         return create(exception, builder.build(), request);
     }
 
+    /** The message names backend addresses and transport errors: shown only with {@code expose-backend-details}. */
     @ExceptionHandler
     public ResponseEntity<Problem> handleUpstream(UpstreamException exception, NativeWebRequest request) {
         Problem problem = Problem.builder()
                 .withTitle(exception.getTitle())
                 .withStatus(statusOf(exception.getHttpStatus()))
-                .withDetail(exception.getMessage())
+                .withDetail(exposeBackendDetails ? exception.getMessage() : HIDDEN_DETAIL)
                 .build();
         return create(exception, problem, request);
+    }
+
+    static final String HIDDEN_DETAIL = "Details are in the server log under the correlation id";
+
+    private static String hiddenFaultDetail(SoapFaultException exception) {
+        return "SoapFault".equals(exception.getFaultName())
+                ? "The SOAP backend reported an error. " + HIDDEN_DETAIL
+                : "The SOAP backend reported " + exception.getFaultName() + ". " + HIDDEN_DETAIL;
     }
 
 #if SPRING_BOOT_3
@@ -95,13 +122,22 @@ public class GlobalExceptionHandler implements ProblemHandling {
      */
     @Override
     public void log(Throwable throwable, Problem problem, NativeWebRequest request, HttpStatus status) {
-        if (throwable instanceof UpstreamException) {
-            log.warn("{} {}: {}", status.value(), problem.getTitle(), problem.getDetail());
+        if (throwable instanceof UpstreamException upstream) {
+            // The exception, not the problem: its detail may be hidden from the client.
+            log.warn("{} {}: {}{}", status.value(), problem.getTitle(), upstream.getMessage(), faultCodes(upstream));
         } else if (status.is5xxServerError()) {
             log.error("{} {}", status.value(), problem.getTitle(), throwable);
         } else {
             ProblemHandling.super.log(throwable, problem, request, status);
         }
+    }
+
+    private static String faultCodes(UpstreamException exception) {
+        if (!(exception instanceof SoapFaultException fault) || fault.getFaultCode() == null) {
+            return "";
+        }
+        return " (fault code " + fault.getFaultCode()
+                + (fault.getFaultSubcodes().isEmpty() ? "" : ", subcodes " + fault.getFaultSubcodes()) + ")";
     }
 
     @Override

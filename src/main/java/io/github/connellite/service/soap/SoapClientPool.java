@@ -4,6 +4,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.LoadingCache;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import io.github.connellite.config.BridgeProperties;
+import io.github.connellite.model.WsdlEndpoint;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.binder.cache.CaffeineCacheMetrics;
 import lombok.extern.slf4j.Slf4j;
@@ -13,7 +14,7 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 
 /**
- * Dynamic CXF clients, one per WSDL URL and endpoint address. Building a client downloads the WSDL and compiles JAXB classes,
+ * Dynamic CXF clients, one per WSDL URL, WSDL port and endpoint address. Building a client downloads the WSDL and compiles JAXB classes,
  * so clients are cached; idle ones are evicted and, optionally, rebuilt in the background to pick up WSDL changes.
  */
 @Slf4j
@@ -35,7 +36,7 @@ public class SoapClientPool implements DisposableBean {
         }
         this.clients = builder
                 .removalListener(SoapClientPool::onRemoval)
-                .build(key -> clientFactory.create(key.wsdlUrl(), key.endpointAddress()));
+                .build(key -> clientFactory.create(key.wsdlUrl(), key.endpoint(), key.endpointAddress()));
         meterRegistry.ifAvailable(registry -> CaffeineCacheMetrics.monitor(registry, clients, "soap.clients"));
     }
 
@@ -47,7 +48,14 @@ public class SoapClientPool implements DisposableBean {
      * @param endpointAddress configured address of the service, {@code null} for the (rebased) WSDL address
      */
     public Client getClient(String wsdlUrl, String endpointAddress) {
-        return clients.get(new ClientKey(wsdlUrl, endpointAddress));
+        return getClient(wsdlUrl, null, endpointAddress);
+    }
+
+    /**
+     * @param endpoint WSDL service and port to call, {@code null} for the one CXF picks
+     */
+    public Client getClient(String wsdlUrl, WsdlEndpoint endpoint, String endpointAddress) {
+        return clients.get(new ClientKey(wsdlUrl, endpoint, endpointAddress));
     }
 
     @Override
@@ -70,6 +78,6 @@ public class SoapClientPool implements DisposableBean {
         }
     }
 
-    private record ClientKey(String wsdlUrl, String endpointAddress) {
+    private record ClientKey(String wsdlUrl, WsdlEndpoint endpoint, String endpointAddress) {
     }
 }

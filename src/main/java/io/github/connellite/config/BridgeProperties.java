@@ -94,6 +94,12 @@ public class BridgeProperties {
     @Setter
     public static class Errors {
         private Map<String, Integer> faultStatus = new LinkedHashMap<>(Map.of("AccessDeniedException", 401));
+        /**
+         * Show backend failure details to REST clients: SOAP fault string, code and subcodes, and the transport
+         * error of 502/503/504 (backend addresses). {@code false}: a generic text; the details are logged.
+         * Declared faults ({@code faultName}, {@code faultInfo}) are shown either way.
+         */
+        private boolean exposeBackendDetails = true;
     }
 
     /**
@@ -108,6 +114,17 @@ public class BridgeProperties {
          * otherwise they are silently ignored and the SOAP parameter stays null.
          */
         private boolean rejectUnknownFields = true;
+        /** Validation of SOAP responses (and faults) against the XSD of the WSDL. */
+        private ResponseValidation response = ResponseValidation.OFF;
+    }
+
+    public enum ResponseValidation {
+        /** Responses are not validated. */
+        OFF,
+        /** Violations are logged as warnings, the response is used anyway. */
+        LOG,
+        /** A response that violates the schema is a contract mismatch: 502. */
+        STRICT
     }
 
     /**
@@ -145,6 +162,11 @@ public class BridgeProperties {
         private String endpointBaseUrl;
         /** Full SOAP endpoint address by service name (as in the REST path); wins over {@code endpoint-base-url}. */
         private Map<String, String> endpointAddresses = new LinkedHashMap<>();
+        /**
+         * WSDL port to expose and call, by service name (as in the REST path), e.g. {@code OrderServiceSoap12};
+         * by default the first SOAP 1.1 port, or SOAP 1.2 port when there is none.
+         */
+        private Map<String, String> ports = new LinkedHashMap<>();
 
         public BasicAuth effectiveWsdlBasicAuth() {
             return wsdlBasicAuth.isConfigured() ? wsdlBasicAuth : basicAuth;
@@ -152,6 +174,10 @@ public class BridgeProperties {
 
         public String endpointAddress(String service) {
             return findIgnoringCase(endpointAddresses, service).filter(address -> !address.isBlank()).orElse(null);
+        }
+
+        public String port(String service) {
+            return findIgnoringCase(ports, service).filter(port -> !port.isBlank()).map(String::trim).orElse(null);
         }
     }
 

@@ -138,7 +138,9 @@ before the SOAP call. A mismatch returns `400` with an `errors` list:
 {"title":"Invalid request body","status":400,"errors":["$.customer: required property 'name' not found","$.customer.age: string found, [integer, null] expected"]}
 ```
 
-Types and required fields are checked; optional fields may be `null`; `format` (date/time) is not enforced.
+Types and required fields are checked; optional fields and `nillable` elements may be `null`; `format` (date/time)
+is not enforced. Repeating elements keep their `minOccurs`/`maxOccurs` as `minItems`/`maxItems`; of an `xs:choice`
+at most one alternative may be sent, exactly one when the choice is required (a member sent as `null` counts as not sent).
 XSD facets are checked as well: `xs:enumeration`, `xs:pattern`, length and numeric range facets
 (`minInclusive`, `maxExclusive`, ...). Patterns that use XSD-only syntax (`\i`, `\c`, `\p{IsBlock}`, class subtraction)
 are not published or checked.
@@ -150,6 +152,7 @@ Operations without XSD field metadata are not validated.
 |----------|-------------|---------|
 | `enabled` | Turn validation on/off | `true` |
 | `reject-unknown-fields` | Reject top-level fields the operation does not have (`400` with `$: allowed fields are [...]`), e.g. `uuid` sent instead of `folderUuid` | `true` |
+| `response` | Validate SOAP responses and fault details against the WSDL schemas: `off`; `log` (warn and use the response anyway); `strict` (`502` *SOAP contract mismatch*, `SOAP response does not match the WSDL schema: cvc-...`) | `off` |
 
 ### Backend authentication and headers: `bridge.backend.*`
 
@@ -206,6 +209,20 @@ bridge:
 
 `endpoint-addresses` wins over `endpoint-base-url`. Timeouts, Basic auth and WS-Security apply to the new address.
 
+#### WSDL port
+
+A WSDL may declare several ports (SOAP 1.1 and 1.2, or ports of different port types). The bridge publishes the
+operations of one port and calls that port: by default the first SOAP 1.1 port (ordered by service and port name),
+the first SOAP 1.2 port when there is none. Ports of other port types are logged as not exposed. Choose another one
+by service name (as in the REST path):
+
+```yaml
+bridge:
+  backend:
+    ports:
+      Orders: OrderServiceSoap12   # wsdl:port name, case-insensitive; an unknown name fails the start
+```
+
 ### SOAP headers declared in the WSDL: `bridge.soap-headers.*`
 
 Headers of the binding (`<soap:header message="..." part="..."/>`, also those of another message) are sent from
@@ -257,7 +274,18 @@ Swagger and validation follow the XSD shape JAXB binds to:
 | named or anonymous `xs:simpleType` restriction | the built-in base type plus its facets (`enum`, `pattern`, ...) |
 | `xs:list` | array of the item type |
 | `xs:group ref` | the group's elements inline |
-| `xs:choice` | all alternatives as optional fields |
+| `xs:choice` | all alternatives as optional fields, plus `oneOf` (required choice) or `not` two of them (optional choice); a repeating choice has no such constraint |
+| `nillable="true"` | `nullable: true` |
+| `minOccurs`/`maxOccurs` of a repeating element | `minItems`/`maxItems` |
+| `xs:documentation`, `wsdl:documentation` | `description` of the property, the operation and the declared fault |
+
+Scalars get the JSON type and the `format` that holds their range (`int32`, `int64`, `float`, `double`, `date`,
+`date-time`, `time`, `byte`). Where that pair does not name the XSD type, `x-xsd-type` does: `xs:decimal` is a
+`number` without `double` format (its values are exact), unbounded integers (`xs:integer`, `xs:unsignedLong`, ...)
+are an `integer` without format, `xs:time`, `xs:token`, the `g*` date types and the like are strings.
+
+Faults the WSDL declares for an operation are published as problem schemas (`faultName` fixed to the fault,
+`faultInfo` shaped like the fault element) under the status `bridge.errors.fault-status` gives them (default `502`).
 
 `xs:any`, `xs:union` (published as a string) and substitution groups are not expanded.
 
@@ -500,6 +528,18 @@ bridge:
 ```
 
 Unlisted faults give 502; a non-standard status code falls back to 502.
+
+The fault string, `faultCode`, `faultSubcodes` and the transport error of a 502/503/504 (backend addresses, HTTP
+status) may reveal backend internals. Hide them from REST clients; they are still logged under the `correlationId`:
+
+```yaml
+bridge:
+  errors:
+    expose-backend-details: false   # default true
+```
+
+The declared fault (`faultName`, `faultInfo`) is part of the WSDL contract and shown either way; the `detail`
+becomes a generic text.
 
 ---
 

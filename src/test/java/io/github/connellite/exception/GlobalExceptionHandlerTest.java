@@ -2,6 +2,7 @@ package io.github.connellite.exception;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import io.github.connellite.config.BridgeProperties;
 import io.github.connellite.correlation.CorrelationId;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -90,6 +91,30 @@ class GlobalExceptionHandlerTest {
         mvc.perform(get("/npe")).andExpect(jsonPath("$.correlationId").value("req-7"));
         mvc.perform(get("/fault")).andExpect(jsonPath("$.correlationId").value("req-7"));
         mvc.perform(get("/invalid")).andExpect(jsonPath("$.correlationId").value("req-7"));
+    }
+
+    @Test
+    void hiddenBackendDetailsKeepDeclaredFaultOnly() throws Exception {
+        BridgeProperties properties = new BridgeProperties();
+        properties.getErrors().setExposeBackendDetails(false);
+        MockMvc hiding = MockMvcBuilders.standaloneSetup(new FailingController())
+                .setControllerAdvice(new GlobalExceptionHandler(properties))
+                .setMessageConverters(new MappingJackson2HttpMessageConverter(new ObjectMapper().registerModule(new ProblemModule())))
+                .build();
+
+        hiding.perform(get("/fault"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.detail").value("The SOAP backend reported AccessDeniedException. "
+                        + GlobalExceptionHandler.HIDDEN_DETAIL))
+                .andExpect(jsonPath("$.faultName").value("AccessDeniedException"))
+                .andExpect(jsonPath("$.faultInfo.code").value(17))
+                .andExpect(jsonPath("$.faultCode").doesNotExist())
+                .andExpect(jsonPath("$.faultSubcodes").doesNotExist())
+                .andExpect(content().string(not(containsString("Token expired"))));
+        hiding.perform(get("/unavailable"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.title").value("SOAP backend unavailable"))
+                .andExpect(jsonPath("$.detail").value(GlobalExceptionHandler.HIDDEN_DETAIL));
     }
 
     @RestController

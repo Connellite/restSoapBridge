@@ -1,11 +1,13 @@
 package io.github.connellite.service.auto.xsd;
 
 import io.github.connellite.model.SchemaField;
+import io.github.connellite.model.SchemaField.ChoiceRef;
 import io.github.connellite.service.auto.xsd.SimpleTypeResolver.SimpleTypeInfo;
 import lombok.experimental.UtilityClass;
 import org.apache.ws.commons.schema.XmlSchema;
 import org.apache.ws.commons.schema.XmlSchemaAll;
 import org.apache.ws.commons.schema.XmlSchemaAllMember;
+import org.apache.ws.commons.schema.XmlSchemaAny;
 import org.apache.ws.commons.schema.XmlSchemaAttribute;
 import org.apache.ws.commons.schema.XmlSchemaAttributeGroup;
 import org.apache.ws.commons.schema.XmlSchemaAttributeGroupRef;
@@ -177,11 +179,17 @@ public class ParticleVisitor {
         }
         SimpleTypeInfo type = SimpleTypeResolver.resolve(resolved.getSchemaTypeName(), resolved.getSchemaType(), schema);
         boolean required = parentRequired && attribute.getUse() == XmlSchemaUse.REQUIRED;
-        addField(fields, simpleField(prefix + name, type, required));
+        String documentation = firstText(Documentation.of(attribute), Documentation.of(resolved));
+        addField(fields, simpleField(prefix + name, type, required, documentation));
     }
 
     private static SchemaField simpleField(String path, SimpleTypeInfo type, boolean required) {
-        return new SchemaField(type.list() ? path + "[]" : path, type.xsdType(), required, type.list(), type.facets());
+        return simpleField(path, type, required, null);
+    }
+
+    private static SchemaField simpleField(String path, SimpleTypeInfo type, boolean required, String documentation) {
+        return new SchemaField(type.list() ? path + "[]" : path, type.xsdType(), required, type.list(), type.facets(),
+                false, null, null, documentation, List.of());
     }
 
     /** An attribute restated by a derived type, or one named like an element, is listed once. */
@@ -213,8 +221,21 @@ public class ParticleVisitor {
             }
         }
         if (particle instanceof XmlSchemaChoice choice) {
+            // A repeating choice is one JAXB list of mixed items: no "one of" constraint fits it.
+            boolean repeating = choice.getMaxOccurs() > 1;
+            boolean optional = !required || choice.getItems().stream().anyMatch(ParticleVisitor::emptyable);
+            String group = prefix + "#choice" + fields.size();
+            int alternative = 0;
             for (XmlSchemaChoiceMember item : choice.getItems()) {
+                int start = fields.size();
                 collectChoiceMember(item, schema, prefix, false, fields, visiting);
+                if (!repeating) {
+                    ChoiceRef ref = new ChoiceRef(group, alternative, depth(prefix), optional);
+                    for (int index = start; index < fields.size(); index++) {
+                        fields.set(index, fields.get(index).withChoice(ref));
+                    }
+                }
+                alternative++;
             }
         }
         if (particle instanceof XmlSchemaAll all) {
@@ -225,6 +246,31 @@ public class ParticleVisitor {
         if (particle instanceof XmlSchemaGroupRef groupRef) {
             collectFieldPaths(groupParticle(groupRef, schema), schema, prefix, required, fields, visiting);
         }
+    }
+
+    /** Number of path segments of a field prefix ({@code a.b[].} → 2). */
+    private static int depth(String prefix) {
+        return prefix.isEmpty() ? 0 : prefix.split("\\.").length;
+    }
+
+    /** Whether a choice alternative may hold no element at all, which leaves the choice itself optional. */
+    private static boolean emptyable(Object member) {
+        if (member instanceof XmlSchemaParticle particle && particle.getMinOccurs() == 0) {
+            return true;
+        }
+        if (member instanceof XmlSchemaSequence sequence) {
+            return sequence.getItems().stream().allMatch(ParticleVisitor::emptyable);
+        }
+        if (member instanceof XmlSchemaAll all) {
+            return all.getItems().stream().allMatch(ParticleVisitor::emptyable);
+        }
+        if (member instanceof XmlSchemaChoice choice) {
+            return choice.getItems().stream().anyMatch(ParticleVisitor::emptyable);
+        }
+        if (member instanceof XmlSchemaGroupRef groupRef && groupRef.getParticle() != null) {
+            return emptyable(groupRef.getParticle());
+        }
+        return member instanceof XmlSchemaAny;
     }
 
     private static XmlSchemaParticle groupParticle(XmlSchemaGroupRef groupRef, XmlSchema schema) {
@@ -299,20 +345,27 @@ public class ParticleVisitor {
         String path = prefix.isEmpty() ? name : prefix + name;
         boolean collection = isRepeating(element);
         boolean required = parentRequired && element.getMinOccurs() > 0;
+        boolean nillable = element.isNillable() || resolvedElement.isNillable();
+        Integer minItems = collection && element.getMinOccurs() > 0 ? (int) element.getMinOccurs() : null;
+        Integer maxItems = collection && element.getMaxOccurs() < Integer.MAX_VALUE ? (int) element.getMaxOccurs() : null;
+        String documentation = firstText(Documentation.of(element), Documentation.of(resolvedElement));
         XmlSchemaComplexType complexType = ComplexTypeResolver.resolve(resolvedElement, schema);
 
         if (complexType != null) {
+            documentation = firstText(documentation, Documentation.of(complexType));
             // JAXB Map<K,V> in XSD is sequence of repeating entry{key,value}.
             // Java beans expose a real Map (no getEntry()), so expand entry[] into SpEL would 502.
             if (!collection && isJaxbMapComplexType(complexType, schema)) {
-                fields.add(new SchemaField(path, MAP_TYPE, required, false));
+                fields.add(new SchemaField(path, MAP_TYPE, required, false, null, nillable, null, null,
+                        documentation, List.of()));
                 return;
             }
 
             // By QName: a:Item holding a b:Item is no recursion.
             String typeKey = complexType.getQName() != null ? complexType.getQName().toString() : path;
             if (!visiting.add(typeKey)) {
-                fields.add(new SchemaField(collection ? path + "[]" : path, "object", required, collection));
+                fields.add(new SchemaField(collection ? path + "[]" : path, "object", required, collection, null,
+                        nillable, minItems, maxItems, documentation, List.of()));
                 return;
             }
 
@@ -322,12 +375,14 @@ public class ParticleVisitor {
             visiting.remove(typeKey);
 
             if (collection) {
-                fields.add(new SchemaField(path + "[]", "object", required, true));
+                fields.add(new SchemaField(path + "[]", "object", required, true, null, nillable, minItems, maxItems,
+                        documentation, List.of()));
             }
             if (!nestedFields.isEmpty()) {
                 fields.addAll(nestedFields);
             } else if (!collection) {
-                fields.add(new SchemaField(path, "object", required, false));
+                fields.add(new SchemaField(path, "object", required, false, null, nillable, null, null,
+                        documentation, List.of()));
             }
             return;
         }
@@ -335,7 +390,17 @@ public class ParticleVisitor {
         SimpleTypeInfo type = SimpleTypeResolver.resolve(
                 resolvedElement.getSchemaTypeName(), resolvedElement.getSchemaType(), schema);
         boolean list = collection || type.list();
-        fields.add(new SchemaField(list ? path + "[]" : path, type.xsdType(), required, list, type.facets()));
+        fields.add(new SchemaField(list ? path + "[]" : path, type.xsdType(), required, list, type.facets(),
+                nillable, minItems, maxItems, documentation, List.of()));
+    }
+
+    private static String firstText(String... candidates) {
+        for (String candidate : candidates) {
+            if (candidate != null) {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     private boolean isRepeating(XmlSchemaElement element) {

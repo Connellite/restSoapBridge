@@ -129,6 +129,72 @@ class RequestSchemaValidatorTest {
                 exception.getErrors().toString());
     }
 
+    @Test
+    void requiredChoiceTakesExactlyOneAlternativeAndNullCountsAsAbsent() {
+        MappingDefinition mapping = choiceMapping(false);
+
+        assertDoesNotThrow(() -> validator.validate(mapping, json("{\"email\": \"a@b\"}")));
+        assertDoesNotThrow(() -> validator.validate(mapping, json("{\"iban\": \"DE1\", \"bic\": \"X\", \"email\": null}")));
+        RequestValidationException both = assertThrows(RequestValidationException.class,
+                () -> validator.validate(mapping, json("{\"email\": \"a@b\", \"bic\": \"X\"}")));
+        assertTrue(both.getErrors().stream().anyMatch(error -> error.contains("one and only one")), both.getErrors().toString());
+        assertThrows(RequestValidationException.class, () -> validator.validate(mapping, json("{}")));
+    }
+
+    @Test
+    void optionalChoiceTakesAtMostOneAlternative() {
+        MappingDefinition mapping = choiceMapping(true);
+
+        assertDoesNotThrow(() -> validator.validate(mapping, json("{}")));
+        assertDoesNotThrow(() -> validator.validate(mapping, json("{\"iban\": \"DE1\"}")));
+        assertThrows(RequestValidationException.class,
+                () -> validator.validate(mapping, json("{\"email\": \"a@b\", \"iban\": \"DE1\"}")));
+    }
+
+    @Test
+    void choiceOfNestedOptionalObjectAllowsNullObject() {
+        SchemaField.ChoiceRef first = new SchemaField.ChoiceRef("pay.#choice0", 0, 1, false);
+        SchemaField.ChoiceRef second = new SchemaField.ChoiceRef("pay.#choice0", 1, 1, false);
+        MappingDefinition mapping = mapping(List.of(
+                new SchemaField("$.pay.card", "string", false, false).withChoice(first),
+                new SchemaField("$.pay.cash", "boolean", false, false).withChoice(second)));
+
+        assertDoesNotThrow(() -> validator.validate(mapping, json("{\"pay\": null}")));
+        assertDoesNotThrow(() -> validator.validate(mapping, json("{\"pay\": {\"cash\": true}}")));
+        assertThrows(RequestValidationException.class,
+                () -> validator.validate(mapping, json("{\"pay\": {\"card\": \"1\", \"cash\": true}}")));
+    }
+
+    @Test
+    void nillableRequiredFieldAcceptsNullAndArraysKeepOccursBounds() {
+        MappingDefinition mapping = mapping(List.of(
+                new SchemaField("$.note", "string", true, false, null, true, null, null, null, List.of()),
+                new SchemaField("$.tags", "string", true, true, null, false, 2, 3, null, List.of())));
+
+        assertDoesNotThrow(() -> validator.validate(mapping, json("{\"note\": null, \"tags\": [\"a\", \"b\"]}")));
+        assertThrows(RequestValidationException.class,
+                () -> validator.validate(mapping, json("{\"note\": \"x\", \"tags\": [\"a\"]}")));
+        assertThrows(RequestValidationException.class,
+                () -> validator.validate(mapping, json("{\"note\": \"x\", \"tags\": [\"a\", \"b\", \"c\", \"d\"]}")));
+    }
+
+    private static MappingDefinition choiceMapping(boolean optional) {
+        SchemaField.ChoiceRef email = new SchemaField.ChoiceRef("#choice0", 0, 0, optional);
+        SchemaField.ChoiceRef account = new SchemaField.ChoiceRef("#choice0", 1, 0, optional);
+        return mapping(List.of(
+                new SchemaField("$.email", "string", false, false).withChoice(email),
+                new SchemaField("$.iban", "string", false, false).withChoice(account),
+                new SchemaField("$.bic", "string", false, false).withChoice(account)));
+    }
+
+    private static MappingDefinition mapping(List<SchemaField> fields) {
+        MappingDefinition mapping = new MappingDefinition();
+        mapping.setPath("/api/Test/op" + fields.hashCode());
+        mapping.setMethod("POST");
+        mapping.setRequestSchemaFields(fields);
+        return mapping;
+    }
+
     private static MappingDefinition facetMapping() {
         MappingDefinition mapping = new MappingDefinition();
         mapping.setPath("/api/Tickets/update");

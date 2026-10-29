@@ -3,6 +3,7 @@ package io.github.connellite.model;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.Data;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -22,6 +23,10 @@ public class MappingDefinition {
     private List<String> responseSchemaPaths;
     private List<SchemaField> requestSchemaFields;
     private List<SchemaField> responseSchemaFields;
+    /** Faults the WSDL declares for the operation. */
+    private List<SoapFaultModel> faults = new ArrayList<>();
+    /** {@code wsdl:documentation} of the operation, or {@code null}. */
+    private String documentation;
 
     public void setRequest(Map<String, String> request) {
         this.request = request != null ? new LinkedHashMap<>(request) : new LinkedHashMap<>();
@@ -43,5 +48,7 @@ public class MappingDefinition {
         private String wsdl;
         /** Configured SOAP endpoint address ({@code bridge.backend.endpoint-addresses}); {@code null}: from WSDL. */
         private String endpointAddress;
+        /** WSDL service and port to call; {@code null}: the one CXF picks (a WSDL without SOAP ports). */
+        private WsdlEndpoint endpoint;
     }
 }

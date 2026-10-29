@@ -15,11 +15,15 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
@@ -157,7 +161,8 @@ public class OpenApiExampleFactory {
                     "negativeinteger" -> 0;
             case "float", "double", "decimal" -> 1.23;
             case "date" -> LocalDate.now().toString();
-            case "datetime", "time" -> LocalDateTime.now().toString();
+            case "datetime" -> LocalDateTime.now().truncatedTo(ChronoUnit.SECONDS).toString();
+            case "time" -> LocalTime.now().truncatedTo(ChronoUnit.SECONDS).toString();
             // Complex value without indexed children (empty or recursive type).
             case "object" -> new LinkedHashMap<String, Object>();
             // JAXB Map (entry/key/value), sent as a plain JSON object.
@@ -281,7 +286,14 @@ public class OpenApiExampleFactory {
         private SchemaFacets facets = SchemaFacets.NONE;
         private boolean required;
         private boolean array;
+        private boolean nillable;
+        private Integer minItems;
+        private Integer maxItems;
+        private String documentation;
         private final Map<String, SchemaNode> children = new LinkedHashMap<>();
+        /** {@code xs:choice} groups of this object: alternative index → member properties, in order. */
+        private final Map<String, Map<Integer, Set<String>>> choices = new LinkedHashMap<>();
+        private final Map<String, Boolean> optionalChoices = new LinkedHashMap<>();
 
         private SchemaNode(String name, String xsdType, boolean required, boolean array) {
             this.name = name;
@@ -306,9 +318,38 @@ public class OpenApiExampleFactory {
                 if (leaf) {
                     child.xsdType = field.xsdType();
                     child.facets = field.facets();
+                    child.nillable = field.nillable();
+                    child.minItems = field.minItems();
+                    child.maxItems = field.maxItems();
+                    child.documentation = field.documentation();
                 }
                 current = child;
             }
+            addChoices(segments, field);
+        }
+
+        /** Registers the member of each choice the field belongs to with the object that holds the choice. */
+        private void addChoices(String[] segments, SchemaField field) {
+            for (SchemaField.ChoiceRef choice : field.choices()) {
+                if (choice.depth() >= segments.length) {
+                    continue;
+                }
+                SchemaNode holder = this;
+                for (int index = 0; index < choice.depth() && holder != null; index++) {
+                    holder = holder.children.get(stripArray(segments[index]));
+                }
+                if (holder == null) {
+                    continue;
+                }
+                holder.choices.computeIfAbsent(choice.group(), key -> new LinkedHashMap<>())
+                        .computeIfAbsent(choice.alternative(), key -> new LinkedHashSet<>())
+                        .add(stripArray(segments[choice.depth()]));
+                holder.optionalChoices.merge(choice.group(), choice.optional(), Boolean::logicalOr);
+            }
+        }
+
+        private static String stripArray(String segment) {
+            return segment.endsWith("[]") ? segment.substring(0, segment.length() - 2) : segment;
         }
 
         private ObjectSchema toObjectSchema() {
@@ -323,36 +364,135 @@ public class OpenApiExampleFactory {
             if (!requiredFields.isEmpty()) {
                 schema.required(requiredFields);
             }
+            addChoiceConstraints(schema);
             return schema;
+        }
+
+        /**
+         * {@code xs:choice}: exactly one alternative ({@code oneOf}) when the choice is required, at most one
+         * ({@code not} two of them) when it is optional. Several choices of one object are combined with
+         * {@code allOf}. An alternative counts as sent when one of its members is.
+         */
+        @SuppressWarnings("rawtypes")
+        private void addChoiceConstraints(ObjectSchema schema) {
+            List<Schema> constraints = new ArrayList<>();
+            choices.forEach((group, alternatives) -> {
+                if (alternatives.size() < 2) {
+                    return;
+                }
+                List<Schema> present = alternatives.values().stream().map(SchemaNode::present).toList();
+                if (!optionalChoices.getOrDefault(group, false)) {
+                    constraints.add(new Schema<>().oneOf(present));
+                    return;
+                }
+                List<Schema> pairs = new ArrayList<>();
+                for (int first = 0; first < present.size(); first++) {
+                    for (int second = first + 1; second < present.size(); second++) {
+                        pairs.add(both(present.get(first), present.get(second)));
+                    }
+                }
+                constraints.add(new Schema<>().not(pairs.size() == 1 ? pairs.get(0) : new Schema<>().anyOf(pairs)));
+            });
+            if (constraints.size() == 1 && constraints.get(0).getOneOf() != null) {
+                schema.setOneOf(constraints.get(0).getOneOf());
+            } else if (constraints.size() == 1) {
+                schema.setNot(constraints.get(0).getNot());
+            } else if (!constraints.isEmpty()) {
+                schema.setAllOf(constraints);
+            }
+        }
+
+        /** Both alternatives sent: one {@code required} list when each has a single member. */
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        private static Schema both(Schema first, Schema second) {
+            if (first.getRequired() != null && second.getRequired() != null) {
+                List<String> members = new ArrayList<>(first.getRequired());
+                members.addAll(second.getRequired());
+                return new Schema<>().required(members);
+            }
+            return new Schema<>().allOf(List.of(first, second));
+        }
+
+        @SuppressWarnings("rawtypes")
+        private static Schema present(Set<String> members) {
+            if (members.size() == 1) {
+                return new Schema<>().required(List.copyOf(members));
+            }
+            return new Schema<>().anyOf(members.stream().map(member -> (Schema) new Schema<>().required(List.of(member)))
+                    .toList());
         }
 
         private Schema<?> toSchema() {
             Schema<?> schema = children.isEmpty() ? withFacets(scalarSchema(xsdType), facets) : toObjectSchema();
+            if (nillable) {
+                schema.setNullable(true);
+            }
             if (!array) {
+                if (documentation != null) {
+                    schema.setDescription(describe(schema.getDescription()));
+                }
                 return schema;
             }
             ArraySchema arraySchema = new ArraySchema();
             arraySchema.setItems(schema);
+            arraySchema.setMinItems(minItems);
+            arraySchema.setMaxItems(maxItems);
+            if (documentation != null) {
+                arraySchema.setDescription(documentation);
+            }
             return arraySchema;
+        }
+
+        /** The XSD documentation ahead of a note the schema already carries (e.g. the JAXB map shape). */
+        private String describe(String existing) {
+            return existing == null ? documentation : documentation + "\n\n" + existing;
         }
     }
 
-    private static Schema<?> scalarSchema(String xsdType) {
-        return switch (normalizeXsdType(xsdType)) {
+    /**
+     * The JSON type of an XSD built-in type, with the {@code format} that holds its value range. Where the pair does
+     * not name the XSD type (unbounded integers, {@code decimal}, {@code time}, {@code token}, the {@code g*} dates,
+     * ...), {@code x-xsd-type} carries it. {@code decimal} has no {@code double} format: its values are exact.
+     */
+    static Schema<?> scalarSchema(String xsdType) {
+        String type = normalizeXsdType(xsdType);
+        Schema<?> schema = switch (type) {
             case "boolean" -> new BooleanSchema();
-            case "byte", "short", "int", "integer", "unsignedbyte", "unsignedshort", "unsignedint",
-                    "nonnegativeinteger", "nonpositiveinteger", "positiveinteger", "negativeinteger" ->
-                    new IntegerSchema().format("int32");
-            case "long", "unsignedlong" -> new IntegerSchema().format("int64");
+            case "byte", "short", "int", "unsignedbyte", "unsignedshort" -> new IntegerSchema().format("int32");
+            case "long", "unsignedint" -> new IntegerSchema().format("int64");
+            case "integer", "unsignedlong", "nonnegativeinteger", "nonpositiveinteger", "positiveinteger",
+                    "negativeinteger" -> new IntegerSchema().format(null);
             case "float" -> new NumberSchema().format("float");
-            case "double", "decimal" -> new NumberSchema().format("double");
+            case "double" -> new NumberSchema().format("double");
+            case "decimal" -> new NumberSchema();
             case "date" -> new StringSchema().format("date");
-            case "datetime", "time" -> new StringSchema().format("date-time");
+            case "datetime" -> new StringSchema().format("date-time");
+            case "time" -> new StringSchema().format("time");
+            // Jackson reads and writes byte[] as base64, whatever the XSD lexical form (hexBinary).
             case "base64binary", "hexbinary" -> new StringSchema().format("byte");
             case "object" -> new ObjectSchema();
             case "map" -> new ObjectSchema().additionalProperties(new StringSchema()).description(MAP_DESCRIPTION);
             default -> new StringSchema();
         };
+        if (!SELF_DESCRIBING_TYPES.contains(type)) {
+            schema.addExtension(XSD_TYPE_EXTENSION, xsdTypeName(xsdType));
+        }
+        return schema;
+    }
+
+    static final String XSD_TYPE_EXTENSION = "x-xsd-type";
+
+    /** XSD types that the JSON type and format already name; {@code object} and {@code map} are bridge types. */
+    private static final Set<String> SELF_DESCRIBING_TYPES = Set.of(
+            "string", "boolean", "int", "long", "float", "double", "date", "datetime", "base64binary",
+            "object", "map");
+
+    private static String xsdTypeName(String xsdType) {
+        if (xsdType == null || xsdType.isBlank()) {
+            return "string";
+        }
+        int colon = xsdType.indexOf(':');
+        return colon >= 0 ? xsdType.substring(colon + 1) : xsdType;
     }
 
     /**

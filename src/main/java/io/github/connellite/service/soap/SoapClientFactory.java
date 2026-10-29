@@ -1,10 +1,13 @@
 package io.github.connellite.service.soap;
 
 import io.github.connellite.config.BridgeProperties;
+import io.github.connellite.model.WsdlEndpoint;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.cxf.configuration.security.AuthorizationPolicy;
 import org.apache.cxf.endpoint.Client;
+import org.apache.cxf.jaxb.JAXBDataBinding;
+import org.apache.cxf.message.Message;
 import org.apache.cxf.jaxws.endpoint.dynamic.JaxWsDynamicClientFactory;
 import org.apache.cxf.service.model.EndpointInfo;
 import org.apache.cxf.transport.http.HTTPConduit;
@@ -16,8 +19,14 @@ import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
+#if SPRING_BOOT_3
+import jakarta.xml.bind.ValidationEventHandler;
+#else
+import javax.xml.bind.ValidationEventHandler;
+#endif
 import javax.security.auth.callback.Callback;
 import javax.security.auth.callback.CallbackHandler;
+import javax.xml.namespace.QName;
 import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
@@ -43,12 +52,27 @@ public class SoapClientFactory {
      *                        {@code null}: the WSDL {@code soap:address}, rebased on {@code endpoint-base-url}
      */
     public Client create(String wsdlUrl, String endpointAddress) {
-        log.info("Creating dynamic SOAP client for WSDL: {}", wsdlUrl);
-        Client client = JaxWsDynamicClientFactory.newInstance().createClient(wsdlUrl);
+        return create(wsdlUrl, null, endpointAddress);
+    }
+
+    /**
+     * @param endpoint WSDL service and port the operations were read from; {@code null}: the one CXF picks
+     */
+    public Client create(String wsdlUrl, WsdlEndpoint endpoint, String endpointAddress) {
+        log.info("Creating dynamic SOAP client for WSDL: {}{}", wsdlUrl, endpoint != null ? " port " + endpoint.port() : "");
+        Client client = endpoint == null
+                ? JaxWsDynamicClientFactory.newInstance().createClient(wsdlUrl)
+                : JaxWsDynamicClientFactory.newInstance().createClient(wsdlUrl, QName.valueOf(endpoint.service()),
+                portName(endpoint));
         // Before configure(): the conduit takes its target address from the endpoint when it is created.
         overrideAddress(client, endpointAddress);
         configure(client);
         return client;
+    }
+
+    /** CXF names an endpoint by the port name in the namespace of its service. */
+    private static QName portName(WsdlEndpoint endpoint) {
+        return new QName(QName.valueOf(endpoint.service()).getNamespaceURI(), endpoint.port());
     }
 
     private void overrideAddress(Client client, String endpointAddress) {
@@ -91,6 +115,27 @@ public class SoapClientFactory {
             configureBasicAuth(conduit);
         }
         configureWsSecurity(client);
+        configureResponseValidation(client);
+    }
+
+    /**
+     * {@code bridge.validation.response}: CXF validates what the client reads (response and fault details) against
+     * the WSDL schemas while unmarshalling. In {@code log} mode a handler reports each violation and lets it pass.
+     */
+    private void configureResponseValidation(Client client) {
+        BridgeProperties.ResponseValidation mode = bridgeProperties.getValidation().getResponse();
+        if (mode == null || mode == BridgeProperties.ResponseValidation.OFF) {
+            return;
+        }
+        client.getEndpoint().put(Message.SCHEMA_VALIDATION_ENABLED, "IN");
+        if (mode == BridgeProperties.ResponseValidation.LOG) {
+            String endpoint = client.getEndpoint().getEndpointInfo().getName().getLocalPart();
+            ValidationEventHandler logOnly = event -> {
+                log.warn("SOAP response of {} does not match the WSDL schema: {}", endpoint, event.getMessage());
+                return true;
+            };
+            client.getEndpoint().put(JAXBDataBinding.READER_VALIDATION_EVENT_HANDLER, logOnly);
+        }
     }
 
     private void configureTimeouts(HTTPConduit conduit) {

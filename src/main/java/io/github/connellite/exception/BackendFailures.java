@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.function.Predicate;
+import java.util.regex.Pattern;
 
 /**
  * Classifies what a SOAP call threw, so that the HTTP status says whose problem it is:
@@ -42,6 +43,8 @@ import java.util.function.Predicate;
 public class BackendFailures {
 
     private static final String DECLARED_FAULT_SUFFIX = "_Exception";
+
+    private static final Pattern SCHEMA_VIOLATION = Pattern.compile("^(?:.*: )?cvc-[A-Za-z0-9.-]+:");
 
 
     public static RuntimeException classify(Throwable failure, Map<String, Integer> faultStatus) {
@@ -64,6 +67,13 @@ public class BackendFailures {
         }
         if (find(failure, HTTPException.class::isInstance) instanceof HTTPException httpError) {
             return httpError(httpError, failure);
+        }
+        // bridge.validation.response=strict: the XSD validator reports cvc-* errors while the response is read.
+        Throwable schemaViolation = find(failure, cause -> cause.getMessage() != null
+                && SCHEMA_VIOLATION.matcher(cause.getMessage()).find());
+        if (schemaViolation != null) {
+            return UpstreamException.contractMismatch("SOAP response does not match the WSDL schema: "
+                    + schemaViolation.getMessage(), failure);
         }
         Throwable invalidResponse = find(failure, cause -> cause instanceof XMLStreamException
                 || cause instanceof UnmarshalException);

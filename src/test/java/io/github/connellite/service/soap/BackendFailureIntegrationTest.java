@@ -1,6 +1,13 @@
 package io.github.connellite.service.soap;
 
+import io.github.connellite.config.BridgeOpenApiBuilder;
 import io.github.connellite.config.BridgeProperties;
+import io.github.connellite.model.MappingDefinition;
+import io.github.connellite.model.MappingRegistry;
+import io.github.connellite.model.SoapFaultModel;
+import io.swagger.v3.oas.models.OpenAPI;
+import io.swagger.v3.oas.models.media.Schema;
+import io.swagger.v3.oas.models.responses.ApiResponse;
 import io.github.connellite.exception.SoapFaultException;
 import io.github.connellite.exception.UpstreamException;
 import io.github.connellite.mapper.path.SoapArgument;
@@ -14,6 +21,8 @@ import javax.jws.WebParam;
 import javax.jws.WebService;
 #endif
 import org.apache.cxf.transport.http_jetty.JettyHTTPServerEngineFactory;
+import org.springframework.beans.factory.support.StaticListableBeanFactory;
+import org.springframework.boot.info.BuildProperties;
 import org.junit.jupiter.api.Test;
 
 import java.net.ServerSocket;
@@ -94,6 +103,32 @@ class BackendFailureIntegrationTest {
             assertEquals(42, fault.getFaultInfo().get("code").asInt(), fault.getFaultInfo().toString());
             // CXF builds the declared exception from the fault bean and drops the SoapFault: no fault code.
             assertNull(fault.getFaultCode());
+        }
+    }
+
+    @Test
+    void declaredFaultIsPublishedUnderTheNameItIsReportedWith() throws Exception {
+        try (SoapTestBackend backend = SoapTestBackend.start("Failures", FailureServiceImpl.class, new FailureServiceImpl())) {
+            BridgeProperties properties = SoapTestBackend.properties();
+            properties.getErrors().setFaultStatus(Map.of("ConflictException", 409));
+            MappingDefinition create = backend.mapping("create");
+
+            OpenAPI openApi = new BridgeOpenApiBuilder(new MappingRegistry(backend.mappings()),
+                    new StaticListableBeanFactory().getBeanProvider(BuildProperties.class), properties).build();
+
+            assertEquals(List.of("ConflictException"), create.getFaults().stream().map(SoapFaultModel::name).toList());
+            Schema<?> problem = openApi.getComponents().getSchemas().get("Failures_createFault_ConflictException");
+            assertEquals(List.of("ConflictException"), problem.getProperties().get("faultName").getEnum());
+            Schema<?> faultInfo = (Schema<?>) problem.getProperties().get("faultInfo");
+            assertTrue(faultInfo.getProperties().containsKey("code"), faultInfo.toString());
+            ApiResponse conflict = openApi.getPaths().get("/api/Failures/create").getPost().getResponses().get("409");
+            assertEquals("#/components/schemas/Failures_createFault_ConflictException",
+                    conflict.getContent().get("application/problem+json").getSchema().get$ref());
+
+            SoapFaultException fault = assertThrows(SoapFaultException.class,
+                    () -> backend.invoker(properties).invoke(backend.wsdlUrl(), "create",
+                            List.of(new SoapArgument("name", "dup"))));
+            assertEquals(problem.getProperties().get("faultName").getEnum().get(0), fault.getFaultName());
         }
     }
 

@@ -1,9 +1,12 @@
 package io.github.connellite.service.auto;
 
+import io.github.connellite.model.SoapFaultModel;
+import io.github.connellite.model.WsdlEndpoint;
 import io.github.connellite.model.WsdlOperationModel;
 import io.github.connellite.model.SchemaField;
 import io.github.connellite.model.SoapHeaderModel;
 import io.github.connellite.config.BridgeProperties;
+import io.github.connellite.service.auto.xsd.Documentation;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.DependsOn;
@@ -13,13 +16,19 @@ import org.springframework.stereotype.Service;
 import javax.wsdl.Binding;
 import javax.wsdl.BindingOperation;
 import javax.wsdl.Definition;
+import javax.wsdl.Fault;
 import javax.wsdl.Message;
 import javax.wsdl.Operation;
 import javax.wsdl.Part;
+import javax.wsdl.Port;
 import javax.wsdl.PortType;
 import javax.wsdl.WSDLException;
+import javax.wsdl.extensions.soap.SOAPAddress;
+import javax.wsdl.extensions.soap.SOAPBinding;
 import javax.wsdl.extensions.soap.SOAPBody;
 import javax.wsdl.extensions.soap.SOAPHeader;
+import javax.wsdl.extensions.soap12.SOAP12Address;
+import javax.wsdl.extensions.soap12.SOAP12Binding;
 import javax.wsdl.extensions.soap12.SOAP12Body;
 import javax.wsdl.extensions.soap12.SOAP12Header;
 import javax.wsdl.factory.WSDLFactory;
@@ -27,7 +36,9 @@ import javax.wsdl.xml.WSDLReader;
 import javax.xml.namespace.QName;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -59,10 +70,19 @@ public class WsdlParser {
     }
 
     public List<WsdlOperationModel> parseOperations(String wsdlUrl) {
-        return operationCache.computeIfAbsent(wsdlUrl, this::parseOperationsFromWsdl);
+        return parseOperations(wsdlUrl, null);
     }
 
-    private List<WsdlOperationModel> parseOperationsFromWsdl(String wsdlUrl) {
+    /**
+     * @param preferredPort name of the WSDL port to expose ({@code bridge.backend.ports}); {@code null}: the first
+     *                      SOAP 1.1 port, or SOAP 1.2 port when there is none
+     */
+    public List<WsdlOperationModel> parseOperations(String wsdlUrl, String preferredPort) {
+        String key = preferredPort == null ? wsdlUrl : wsdlUrl + "#port=" + preferredPort;
+        return operationCache.computeIfAbsent(key, ignored -> parseOperationsFromWsdl(wsdlUrl, preferredPort));
+    }
+
+    private List<WsdlOperationModel> parseOperationsFromWsdl(String wsdlUrl, String preferredPort) {
         try {
             WSDLReader reader = WSDLFactory.newInstance().newWSDLReader();
             reader.setFeature("javax.wsdl.verbose", false);
@@ -71,9 +91,14 @@ public class WsdlParser {
             Map<QName, List<SchemaField>> elementSchemaFields = XsdFieldIndex.readElementSchemaFields(definition);
             Map<QName, SchemaField> simpleElements = XsdFieldIndex.readSimpleElements(definition);
 
+            SelectedPort selected = selectPort(definition, wsdlUrl, preferredPort);
+            List<PortType> portTypes = selected != null
+                    ? List.of(selected.binding().getPortType())
+                    : definition.getAllPortTypes().values().stream().map(PortType.class::cast).toList();
+            WsdlEndpoint endpoint = selected != null ? selected.endpoint() : null;
+
             List<WsdlOperationModel> result = new ArrayList<>();
-            for (Object value : definition.getAllPortTypes().values()) {
-                PortType portType = (PortType) value;
+            for (PortType portType : portTypes) {
                 for (Object operationValue : portType.getOperations()) {
                     Operation operation = (Operation) operationValue;
                     String operationName = operation.getName();
@@ -81,7 +106,9 @@ public class WsdlParser {
                         continue;
                     }
 
-                    BindingOperation binding = bindingOperation(definition, portType, operation);
+                    BindingOperation binding = selected != null
+                            ? bindingOperation(selected.binding(), operation)
+                            : bindingOperation(definition, portType, operation);
                     Message inputMessage = operation.getInput() != null ? operation.getInput().getMessage() : null;
                     Message outputMessage = operation.getOutput() != null ? operation.getOutput().getMessage() : null;
                     List<?> inputExtensions = binding != null && binding.getBindingInput() != null
@@ -113,7 +140,10 @@ public class WsdlParser {
                             outputElement != null ? outputElement.getLocalPart() : operationName + "Response",
                             paths(outputFields),
                             outputFields,
-                            inputHeaders
+                            inputHeaders,
+                            faults(operation, elementSchemaFields, simpleElements),
+                            Documentation.of(operation.getDocumentationElement()),
+                            endpoint
                     ));
                 }
             }
@@ -143,8 +173,79 @@ public class WsdlParser {
     }
 
     /**
-     * The binding operation of a port type operation; with several bindings (SOAP 1.1 and 1.2) the first one,
-     * they declare the same body and headers.
+     * The port the SOAP client calls, so that the published operations are the ones it can invoke: the configured
+     * one, otherwise the first SOAP 1.1 port (SOAP 1.2 when there is none) in a stable order. {@code null} for a
+     * WSDL without SOAP ports (an abstract interface document): then every port type is listed.
+     */
+    static SelectedPort selectPort(Definition definition, String wsdlUrl, String preferredPort) {
+        List<SelectedPort> candidates = new ArrayList<>();
+        for (Object serviceValue : definition.getAllServices().values()) {
+            javax.wsdl.Service service = (javax.wsdl.Service) serviceValue;
+            for (Object portValue : service.getPorts().values()) {
+                Port port = (Port) portValue;
+                Boolean soap12 = soapVersion12(port);
+                if (soap12 != null && port.getBinding() != null && port.getBinding().getPortType() != null) {
+                    candidates.add(new SelectedPort(
+                            new WsdlEndpoint(service.getQName().toString(), port.getName()), port.getBinding(), soap12));
+                }
+            }
+        }
+        if (candidates.isEmpty()) {
+            if (preferredPort != null) {
+                throw new IllegalStateException("bridge.backend.ports: WSDL has no SOAP port " + preferredPort);
+            }
+            return null;
+        }
+        candidates.sort(Comparator.comparing(SelectedPort::soap12)
+                .thenComparing(candidate -> candidate.endpoint().service())
+                .thenComparing(candidate -> candidate.endpoint().port()));
+
+        SelectedPort selected = preferredPort == null
+                ? candidates.get(0)
+                : candidates.stream()
+                .filter(candidate -> candidate.endpoint().port().equalsIgnoreCase(preferredPort))
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("bridge.backend.ports: WSDL has no SOAP port "
+                        + preferredPort + "; ports: " + candidates.stream().map(c -> c.endpoint().port()).toList()));
+        Set<String> skipped = new LinkedHashSet<>();
+        for (SelectedPort candidate : candidates) {
+            if (!candidate.binding().getPortType().getQName().equals(selected.binding().getPortType().getQName())) {
+                skipped.add(candidate.endpoint().port());
+            }
+        }
+        if (!skipped.isEmpty()) {
+            log.warn("WSDL {}: exposing port {}; ports {} implement other port types and are not exposed "
+                    + "(choose one with bridge.backend.ports)", wsdlUrl, selected.endpoint().port(), skipped);
+        }
+        return selected;
+    }
+
+    /** {@code false} for SOAP 1.1, {@code true} for SOAP 1.2, {@code null} for a port not bound to SOAP. */
+    private static Boolean soapVersion12(Port port) {
+        boolean soap11Address = port.getExtensibilityElements().stream().anyMatch(SOAPAddress.class::isInstance);
+        boolean soap12Address = port.getExtensibilityElements().stream().anyMatch(SOAP12Address.class::isInstance);
+        List<?> bindingExtensions = port.getBinding() != null ? port.getBinding().getExtensibilityElements() : List.of();
+        if (soap11Address && bindingExtensions.stream().anyMatch(SOAPBinding.class::isInstance)) {
+            return false;
+        }
+        if (soap12Address && bindingExtensions.stream().anyMatch(SOAP12Binding.class::isInstance)) {
+            return true;
+        }
+        return null;
+    }
+
+    record SelectedPort(WsdlEndpoint endpoint, Binding binding, boolean soap12) {
+    }
+
+    private static BindingOperation bindingOperation(Binding binding, Operation operation) {
+        String inputName = operation.getInput() != null ? operation.getInput().getName() : null;
+        String outputName = operation.getOutput() != null ? operation.getOutput().getName() : null;
+        return binding.getBindingOperation(operation.getName(), inputName, outputName);
+    }
+
+    /**
+     * Without a SOAP port, the binding operation of a port type operation; with several bindings (SOAP 1.1 and 1.2)
+     * the first one, they declare the same body and headers.
      */
     private static BindingOperation bindingOperation(Definition definition, PortType portType, Operation operation) {
         for (Object value : definition.getAllBindings().values()) {
@@ -152,14 +253,54 @@ public class WsdlParser {
             if (binding.getPortType() == null || !portType.getQName().equals(binding.getPortType().getQName())) {
                 continue;
             }
-            String inputName = operation.getInput() != null ? operation.getInput().getName() : null;
-            String outputName = operation.getOutput() != null ? operation.getOutput().getName() : null;
-            BindingOperation bindingOperation = binding.getBindingOperation(operation.getName(), inputName, outputName);
+            BindingOperation bindingOperation = bindingOperation(binding, operation);
             if (bindingOperation != null) {
                 return bindingOperation;
             }
         }
         return null;
+    }
+
+    /**
+     * Declared faults of an operation. The name is the one the bridge reports as {@code faultName}: the dynamic
+     * client names the fault exception after the fault message (JAX-WS), as a Java class name.
+     */
+    private static List<SoapFaultModel> faults(Operation operation, Map<QName, List<SchemaField>> elementSchemaFields,
+                                               Map<QName, SchemaField> simpleElements) {
+        List<SoapFaultModel> faults = new ArrayList<>();
+        for (Object value : operation.getFaults().values()) {
+            Fault fault = (Fault) value;
+            Message message = fault.getMessage();
+            if (message == null || message.getQName() == null) {
+                continue;
+            }
+            Part part = ((List<?>) message.getOrderedParts(null)).stream()
+                    .map(Part.class::cast)
+                    .filter(candidate -> candidate.getElementName() != null)
+                    .findFirst()
+                    .orElse(null);
+            List<SchemaField> fields = part == null ? List.of()
+                    : elementSchemaFields.containsKey(part.getElementName())
+                    ? elementSchemaFields.get(part.getElementName())
+                    : simpleElements.containsKey(part.getElementName())
+                    ? List.of(simpleElements.get(part.getElementName()))
+                    : List.of();
+            faults.add(new SoapFaultModel(javaClassName(message.getQName().getLocalPart()), fields,
+                    Documentation.of(fault.getDocumentationElement())));
+        }
+        faults.sort(Comparator.comparing(SoapFaultModel::name));
+        return faults;
+    }
+
+    /** JAXB's XML name to class name: words split at non-identifier characters, each capitalized. */
+    static String javaClassName(String xmlName) {
+        StringBuilder name = new StringBuilder();
+        for (String word : xmlName.split("[^\\p{L}\\p{Nd}]+")) {
+            if (!word.isEmpty()) {
+                name.append(Character.toUpperCase(word.charAt(0))).append(word.substring(1));
+            }
+        }
+        return name.toString();
     }
 
     /**

@@ -1,6 +1,7 @@
 package io.github.connellite.service.auto;
 
 import io.github.connellite.model.SchemaField;
+import io.github.connellite.model.WsdlEndpoint;
 import io.github.connellite.model.WsdlOperationModel;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -12,6 +13,8 @@ import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class WsdlParserTest {
 
@@ -218,6 +221,67 @@ class WsdlParserTest {
 
         assertEquals(List.of(new SchemaField("filter.query", "string", true, false)),
                 operation(parse("service.wsdl"), "find").inputSchemaFields());
+    }
+
+    @Test
+    void parseOperations_prefersSoap11PortAndHonoursConfiguredPort() throws Exception {
+        write("service.wsdl", """
+                <wsdl:definitions xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+                                  xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+                                  xmlns:soap12="http://schemas.xmlsoap.org/wsdl/soap12/"
+                                  xmlns:xs="http://www.w3.org/2001/XMLSchema"
+                                  xmlns:tns="urn:svc" targetNamespace="urn:svc">
+                  <wsdl:types>
+                    <xs:schema targetNamespace="urn:svc" elementFormDefault="qualified">
+                      <xs:element name="echo">
+                        <xs:complexType><xs:sequence><xs:element name="text" type="xs:string"/></xs:sequence></xs:complexType>
+                      </xs:element>
+                    </xs:schema>
+                  </wsdl:types>
+                  <wsdl:message name="echo"><wsdl:part name="parameters" element="tns:echo"/></wsdl:message>
+                  <wsdl:portType name="Echo">
+                    <wsdl:operation name="echo"><wsdl:input message="tns:echo"/></wsdl:operation>
+                  </wsdl:portType>
+                  <wsdl:binding name="EchoSoap12Binding" type="tns:Echo">
+                    <soap12:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+                    <wsdl:operation name="echo">
+                      <soap12:operation soapAction=""/>
+                      <wsdl:input><soap12:body use="literal"/></wsdl:input>
+                    </wsdl:operation>
+                  </wsdl:binding>
+                  <wsdl:binding name="EchoSoapBinding" type="tns:Echo">
+                    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+                    <wsdl:operation name="echo">
+                      <soap:operation soapAction=""/>
+                      <wsdl:input><soap:body use="literal"/></wsdl:input>
+                    </wsdl:operation>
+                  </wsdl:binding>
+                  <wsdl:service name="EchoService">
+                    <wsdl:port name="AEchoSoap12" binding="tns:EchoSoap12Binding">
+                      <soap12:address location="http://localhost/echo12"/>
+                    </wsdl:port>
+                    <wsdl:port name="EchoSoap" binding="tns:EchoSoapBinding">
+                      <soap:address location="http://localhost/echo"/>
+                    </wsdl:port>
+                  </wsdl:service>
+                </wsdl:definitions>
+                """);
+        String url = dir.resolve("service.wsdl").toUri().toString();
+
+        assertEquals(new WsdlEndpoint("{urn:svc}EchoService", "EchoSoap"),
+                operation(new WsdlParser().parseOperations(url), "echo").endpoint());
+        assertEquals(new WsdlEndpoint("{urn:svc}EchoService", "AEchoSoap12"),
+                operation(new WsdlParser().parseOperations(url, "aechosoap12"), "echo").endpoint());
+        IllegalStateException unknown = assertThrows(IllegalStateException.class,
+                () -> new WsdlParser().parseOperations(url, "Missing"));
+        assertTrue(unknown.getMessage().contains("no SOAP port Missing; ports: [EchoSoap, AEchoSoap12]"),
+                unknown.getMessage());
+    }
+
+    @Test
+    void javaClassName_capitalizesWordsOfTheMessageName() {
+        assertEquals("AccessDeniedException", WsdlParser.javaClassName("AccessDeniedException"));
+        assertEquals("NotFoundFault", WsdlParser.javaClassName("not-found_fault"));
     }
 
     private List<WsdlOperationModel> parse(String file) {

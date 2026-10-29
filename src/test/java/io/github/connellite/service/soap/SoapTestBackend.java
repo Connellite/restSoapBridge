@@ -75,7 +75,7 @@ final class SoapTestBackend implements AutoCloseable {
         WsdlUrlCollector collector = mock(WsdlUrlCollector.class);
         when(collector.wsdlUrls()).thenReturn(List.of());
         when(discovery.discover(null, List.of())).thenReturn(List.of(new DiscoveredSoapService(
-                serviceName, wsdlUrl, new WsdlParser().parseOperations(wsdlUrl))));
+                serviceName, wsdlUrl, new WsdlParser().parseOperations(wsdlUrl, properties.getBackend().port(serviceName)))));
         List<MappingDefinition> mappings = new AutoMappingGenerator(properties, discovery, collector).generate();
         return new SoapTestBackend(endpoint, serviceName, wsdlUrl, mappings, properties);
     }

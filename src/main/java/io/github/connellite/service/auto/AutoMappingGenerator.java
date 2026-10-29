@@ -116,7 +116,10 @@ public class AutoMappingGenerator {
         soap.setOperation(operation.name());
         soap.setWsdl(service.wsdlUrl());
         soap.setEndpointAddress(bridgeProperties.getBackend().endpointAddress(service.name()));
+        soap.setEndpoint(operation.endpoint());
         mapping.setSoap(soap);
+        mapping.setFaults(operation.faults());
+        mapping.setDocumentation(operation.documentation());
 
         Map<String, String> request = new LinkedHashMap<>();
         for (String field : operation.inputFields()) {
@@ -162,8 +165,7 @@ public class AutoMappingGenerator {
                 }
                 requestSchemaPaths.add(toRestJsonPath(restField));
                 // A header is optional as a whole, so none of its fields is required.
-                requestSchemaFields.add(new SchemaField(restField, field.xsdType(), false, field.collection(),
-                        field.facets()));
+                requestSchemaFields.add(field.withPath(restField).withRequired(false));
             }
         }
         mapping.setHeaderRequest(headerRequest);
@@ -201,13 +203,7 @@ public class AutoMappingGenerator {
             List<SchemaField> fields
     ) {
         return fields.stream()
-                .map(field -> new SchemaField(
-                        toRestJsonPath(field.path()),
-                        field.xsdType(),
-                        field.required(),
-                        field.collection(),
-                        field.facets()
-                ))
+                .map(field -> field.withPath(toRestJsonPath(field.path())))
                 .toList();
     }
 

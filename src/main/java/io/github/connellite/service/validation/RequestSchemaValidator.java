@@ -109,19 +109,33 @@ public class RequestSchemaValidator {
 
     /**
      * Turns an OpenAPI 3.0 schema into a JSON Schema draft-07 one:
-     * examples are dropped, {@code format} is not asserted (XSD date/time lexical forms are wider than RFC 3339),
-     * and optional properties also accept {@code null}, as JAXB does.
+     * examples and vendor extensions are dropped, {@code format} is not asserted (XSD date/time lexical forms are
+     * wider than RFC 3339), and optional and {@code nullable} (XSD {@code nillable}) properties also accept
+     * {@code null}, as JAXB does.
      */
     static void toValidationSchema(ObjectNode schema) {
         schema.remove("example");
         schema.remove("format");
+        schema.remove("nullable");
+        List<String> extensions = new ArrayList<>();
+        schema.fieldNames().forEachRemaining(name -> {
+            if (name.startsWith("x-")) {
+                extensions.add(name);
+            }
+        });
+        schema.remove(extensions);
         toNumericExclusiveBound(schema, "exclusiveMinimum", "minimum");
         toNumericExclusiveBound(schema, "exclusiveMaximum", "maximum");
         allowStringEncodedScalar(schema);
+        toChoiceConstraint(schema);
 
         JsonNode items = schema.get("items");
         if (items instanceof ObjectNode itemsSchema) {
+            boolean nullable = isNullable(itemsSchema);
             toValidationSchema(itemsSchema);
+            if (nullable) {
+                allowNull(itemsSchema);
+            }
         }
         if (schema.get("additionalProperties") instanceof ObjectNode mapValueSchema) {
             toValidationSchema(mapValueSchema);
@@ -139,13 +153,59 @@ public class RequestSchemaValidator {
                 if (!(field.getValue() instanceof ObjectNode property)) {
                     continue;
                 }
+                boolean nullable = isNullable(property);
                 toValidationSchema(property);
-                if (!required.contains(field.getKey())) {
+                if (!required.contains(field.getKey()) || nullable) {
                     allowNull(property);
                 }
             }
         }
         allowKeyValueAlternative(schema);
+    }
+
+    private static boolean isNullable(ObjectNode schema) {
+        return schema.path("nullable").asBoolean(false);
+    }
+
+    /**
+     * {@code xs:choice} constraints of an object ({@code oneOf} / {@code not} / {@code allOf} of {@code required}
+     * lists): a member sent as {@code null} is not sent, as JAXB leaves it out, so each {@code required} also
+     * demands a non-null value. They apply to an object only: {@code required} holds for any other value, a
+     * {@code null} optional object included.
+     */
+    private static void toChoiceConstraint(ObjectNode schema) {
+        if (!isType(schema, "object")) {
+            return;
+        }
+        ObjectNode then = JsonNodeFactory.instance.objectNode();
+        for (String keyword : List.of("oneOf", "not", "allOf")) {
+            JsonNode constraint = schema.remove(keyword);
+            if (constraint != null) {
+                requireNonNullMembers(constraint);
+                then.set(keyword, constraint);
+            }
+        }
+        if (!then.isEmpty()) {
+            schema.putObject("if").put("type", "object");
+            schema.set("then", then);
+        }
+    }
+
+    private static void requireNonNullMembers(JsonNode constraint) {
+        if (constraint instanceof ArrayNode alternatives) {
+            alternatives.forEach(RequestSchemaValidator::requireNonNullMembers);
+            return;
+        }
+        if (!(constraint instanceof ObjectNode node)) {
+            return;
+        }
+        if (node.get("required") instanceof ArrayNode members && !node.has("type") && !node.has("properties")) {
+            ObjectNode properties = node.putObject("properties");
+            members.forEach(member -> properties.putObject(member.asText()).putObject("not").put("type", "null"));
+        }
+        for (String keyword : List.of("oneOf", "anyOf", "allOf", "not")) {
+            requireNonNullMembers(node.get(keyword));
+        }
     }
 
     /**

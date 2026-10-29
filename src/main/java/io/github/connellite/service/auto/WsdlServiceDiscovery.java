@@ -85,7 +85,7 @@ public class WsdlServiceDiscovery {
         for (Map.Entry<String, String> entry : services.entrySet()) {
             String wsdlUrl = entry.getValue();
             try {
-                List<WsdlOperationModel> operations = wsdlParser.parseOperations(wsdlUrl);
+                List<WsdlOperationModel> operations = wsdlParser.parseOperations(wsdlUrl, port(entry.getKey()));
                 discoveredByWsdl.putIfAbsent(wsdlUrl, new DiscoveredSoapService(entry.getKey(), wsdlUrl, operations));
                 log.debug("Discovered service {} with {} operation(s)", entry.getKey(), operations.size());
             } catch (RuntimeException exception) {
@@ -153,9 +153,13 @@ public class WsdlServiceDiscovery {
 
     public DiscoveredSoapService discoverFromWsdl(String wsdlUrl) {
         String serviceName = serviceNameFromWsdlUrl(wsdlUrl);
-        List<WsdlOperationModel> operations = wsdlParser.parseOperations(wsdlUrl);
+        List<WsdlOperationModel> operations = wsdlParser.parseOperations(wsdlUrl, port(serviceName));
         log.info("Loaded {} operation(s) from WSDL {}", operations.size(), wsdlUrl);
         return new DiscoveredSoapService(serviceName, wsdlUrl, operations);
+    }
+
+    private String port(String serviceName) {
+        return bridgeProperties.getBackend().port(serviceName);
     }
 
     static String serviceNameFromWsdlUrl(String wsdlUrl) {
