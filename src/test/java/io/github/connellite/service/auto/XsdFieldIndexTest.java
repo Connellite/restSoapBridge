@@ -9,6 +9,7 @@ import org.w3c.dom.Document;
 import javax.wsdl.Definition;
 import javax.wsdl.Types;
 import javax.wsdl.factory.WSDLFactory;
+import javax.xml.namespace.QName;
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.ByteArrayInputStream;
 import java.math.BigDecimal;
@@ -55,7 +56,7 @@ class XsdFieldIndexTest {
                 </xs:schema>
                 """);
 
-        Map<String, List<String>> fields = XsdFieldIndex.readElementFields(definition);
+        Map<QName, List<String>> fields = XsdFieldIndex.readElementFields(definition);
 
         assertEquals(List.of(
                 "customer.name",
@@ -66,9 +67,9 @@ class XsdFieldIndexTest {
                 "email",
                 "phoneContact",
                 "externalId"
-        ), fields.get("createOrder"));
+        ), fields.get(new QName("urn:test", "createOrder")));
 
-        Map<String, List<SchemaField>> schemaFields = XsdFieldIndex.readElementSchemaFields(definition);
+        Map<QName, List<SchemaField>> schemaFields = XsdFieldIndex.readElementSchemaFields(definition);
         assertEquals(List.of(
                 new SchemaField("customer.name", "string", true, false),
                 new SchemaField("customer.phone", "string", true, false),
@@ -78,7 +79,7 @@ class XsdFieldIndexTest {
                 new SchemaField("email", "string", false, false),
                 new SchemaField("phoneContact", "string", false, false),
                 new SchemaField("externalId", "string", true, false)
-        ), schemaFields.get("createOrder"));
+        ), schemaFields.get(new QName("urn:test", "createOrder")));
     }
 
     @Test
@@ -117,13 +118,13 @@ class XsdFieldIndexTest {
                 </xs:schema>
                 """);
 
-        Map<String, List<String>> fields = XsdFieldIndex.readElementFields(definition);
+        Map<QName, List<String>> fields = XsdFieldIndex.readElementFields(definition);
 
         assertEquals(List.of(
                 "return.uuid",
                 "return.name",
                 "return.labels"
-        ), fields.get("getItemResponse"));
+        ), fields.get(new QName("urn:test", "getItemResponse")));
     }
 
     @Test
@@ -208,7 +209,7 @@ class XsdFieldIndexTest {
                 </xs:schema>
                 """);
 
-        List<SchemaField> fields = XsdFieldIndex.readElementSchemaFields(definition).get("register");
+        List<SchemaField> fields = XsdFieldIndex.readElementSchemaFields(definition).get(new QName("urn:test", "register"));
 
         SchemaFacets level = new SchemaFacets(List.of("GOLD", "PLATINUM"), null, null, null, null, false, null, false);
         SchemaFacets discount = new SchemaFacets(List.of(), null, null, null,
@@ -259,7 +260,43 @@ class XsdFieldIndexTest {
         definition.setTypes(types);
 
         assertEquals(List.of(new SchemaField("filter.text", "string", true, false)),
-                XsdFieldIndex.readElementSchemaFields(definition).get("find"));
+                XsdFieldIndex.readElementSchemaFields(definition).get(new QName("urn:api", "find")));
+    }
+
+    @Test
+    void readElementSchemaFields_expandsTypeNamedLikeAnEnclosingTypeOfAnotherNamespace() throws Exception {
+        WSDLFactory factory = WSDLFactory.newInstance();
+        Definition definition = factory.newDefinition();
+        Types types = definition.createTypes();
+        types.addExtensibilityElement(schema("""
+                <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:a"
+                           xmlns:a="urn:a" xmlns:b="urn:b" elementFormDefault="qualified">
+                  <xs:import namespace="urn:b"/>
+                  <xs:element name="item" type="a:Item"/>
+                  <xs:complexType name="Item">
+                    <xs:sequence>
+                      <xs:element name="name" type="xs:string"/>
+                      <xs:element name="part" type="b:Item"/>
+                    </xs:sequence>
+                  </xs:complexType>
+                </xs:schema>
+                """));
+        types.addExtensibilityElement(schema("""
+                <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:b"
+                           elementFormDefault="qualified">
+                  <xs:complexType name="Item">
+                    <xs:sequence>
+                      <xs:element name="code" type="xs:string"/>
+                    </xs:sequence>
+                  </xs:complexType>
+                </xs:schema>
+                """));
+        definition.setTypes(types);
+
+        assertEquals(List.of(
+                new SchemaField("name", "string", true, false),
+                new SchemaField("part.code", "string", true, false)
+        ), XsdFieldIndex.readElementSchemaFields(definition).get(new QName("urn:a", "item")));
     }
 
     private static SchemaImpl schema(String xsd) throws Exception {

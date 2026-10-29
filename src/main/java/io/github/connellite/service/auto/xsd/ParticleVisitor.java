@@ -309,7 +309,8 @@ public class ParticleVisitor {
                 return;
             }
 
-            String typeKey = complexType.getName() != null ? complexType.getName() : path;
+            // By QName: a:Item holding a b:Item is no recursion.
+            String typeKey = complexType.getQName() != null ? complexType.getQName().toString() : path;
             if (!visiting.add(typeKey)) {
                 fields.add(new SchemaField(collection ? path + "[]" : path, "object", required, collection));
                 return;

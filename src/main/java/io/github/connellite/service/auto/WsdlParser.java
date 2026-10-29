@@ -68,9 +68,8 @@ public class WsdlParser {
             reader.setFeature("javax.wsdl.verbose", false);
             Definition definition = readDefinition(reader, wsdlUrl);
 
-            Map<String, List<String>> elementFields = XsdFieldIndex.readElementFields(definition);
-            Map<String, List<SchemaField>> elementSchemaFields = XsdFieldIndex.readElementSchemaFields(definition);
-            Map<String, SchemaField> simpleElements = XsdFieldIndex.readSimpleElements(definition);
+            Map<QName, List<SchemaField>> elementSchemaFields = XsdFieldIndex.readElementSchemaFields(definition);
+            Map<QName, SchemaField> simpleElements = XsdFieldIndex.readSimpleElements(definition);
 
             List<WsdlOperationModel> result = new ArrayList<>();
             for (Object value : definition.getAllPortTypes().values()) {
@@ -91,8 +90,10 @@ public class WsdlParser {
                     List<?> outputExtensions = binding != null && binding.getBindingOutput() != null
                             ? binding.getBindingOutput().getExtensibilityElements()
                             : List.of();
-                    String inputElement = bodyElement(inputMessage, inputExtensions, operationName);
-                    String outputElement = bodyElement(outputMessage, outputExtensions, operationName + "Response");
+                    QName inputElement = bodyElement(inputMessage, inputExtensions);
+                    QName outputElement = bodyElement(outputMessage, outputExtensions);
+                    List<SchemaField> inputFields = elementSchemaFields.getOrDefault(inputElement, List.of());
+                    List<SchemaField> outputFields = elementSchemaFields.getOrDefault(outputElement, List.of());
 
                     List<SoapHeaderModel> inputHeaders = new ArrayList<>();
                     for (HeaderPart header : headerParts(definition, inputMessage, inputExtensions)) {
@@ -101,17 +102,17 @@ public class WsdlParser {
                                 : simpleElements.containsKey(header.element())
                                 ? List.of(simpleElements.get(header.element()))
                                 : List.of();
-                        inputHeaders.add(new SoapHeaderModel(header.part(), header.element(), fields));
+                        inputHeaders.add(new SoapHeaderModel(header.part(), header.element().getLocalPart(), fields));
                     }
 
                     result.add(new WsdlOperationModel(
                             operationName,
-                            inputElement,
-                            elementFields.getOrDefault(inputElement, List.of()),
-                            elementSchemaFields.getOrDefault(inputElement, List.of()),
-                            outputElement,
-                            elementFields.getOrDefault(outputElement, List.of()),
-                            elementSchemaFields.getOrDefault(outputElement, List.of()),
+                            inputElement != null ? inputElement.getLocalPart() : operationName,
+                            paths(inputFields),
+                            inputFields,
+                            outputElement != null ? outputElement.getLocalPart() : operationName + "Response",
+                            paths(outputFields),
+                            outputFields,
                             inputHeaders
                     ));
                 }
@@ -129,6 +130,10 @@ public class WsdlParser {
         } finally {
             locator.close();
         }
+    }
+
+    private static List<String> paths(List<SchemaField> fields) {
+        return fields.stream().map(SchemaField::path).toList();
     }
 
     private static String rootMessage(Throwable failure) {
@@ -160,11 +165,11 @@ public class WsdlParser {
     /**
      * Element of the message part that goes into the SOAP body: the one {@code soap:body parts} names, otherwise
      * the first part that is not a {@code soap:header}. Message parts are unordered in wsdl4j, so the first part
-     * alone may well be a header.
+     * alone may well be a header. {@code null} without such a part (no message, RPC {@code type} parts).
      */
-    private static String bodyElement(Message message, List<?> bindingExtensions, String fallback) {
+    private static QName bodyElement(Message message, List<?> bindingExtensions) {
         if (message == null) {
-            return fallback;
+            return null;
         }
         List<?> bodyParts = null;
         Set<String> headerParts = new HashSet<>();
@@ -185,10 +190,10 @@ public class WsdlParser {
                     ? bodyParts.contains(part.getName())
                     : !headerParts.contains(part.getName());
             if (body && part.getElementName() != null) {
-                return part.getElementName().getLocalPart();
+                return part.getElementName();
             }
         }
-        return fallback;
+        return null;
     }
 
     /**
@@ -216,7 +221,7 @@ public class WsdlParser {
                 continue;
             }
             if (headers.stream().noneMatch(existing -> existing.part().equals(partName))) {
-                headers.add(new HeaderPart(partName, part.getElementName().getLocalPart()));
+                headers.add(new HeaderPart(partName, part.getElementName()));
             }
         }
         return headers;
@@ -226,6 +231,6 @@ public class WsdlParser {
         return headerMessage == null || headerMessage.equals(message.getQName());
     }
 
-    private record HeaderPart(String part, String element) {
+    private record HeaderPart(String part, QName element) {
     }
 }
