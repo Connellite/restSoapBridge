@@ -8,6 +8,7 @@ import io.github.connellite.model.SchemaField;
 import io.github.connellite.model.SoapHeaderModel;
 import io.github.connellite.config.BridgeProperties;
 import io.github.connellite.model.SchemaProperty;
+import io.github.connellite.model.SchemaTrees;
 import io.github.connellite.model.SchemaType;
 import io.github.connellite.service.auto.xsd.Documentation;
 import io.github.connellite.service.auto.xsd.SchemaIndexer;
@@ -124,8 +125,16 @@ public class WsdlParser {
                             : List.of();
                     QName inputElement = bodyElement(inputMessage, inputExtensions);
                     QName outputElement = bodyElement(outputMessage, outputExtensions);
-                    List<SchemaField> inputFields = elementSchemaFields.getOrDefault(inputElement, List.of());
-                    List<SchemaField> outputFields = elementSchemaFields.getOrDefault(outputElement, List.of());
+                    SchemaType inputType = bodyType(inputElement, index);
+                    SchemaType outputType = bodyType(outputElement, index);
+                    boolean inputSimple = isSimple(inputElement, index);
+                    boolean outputSimple = isSimple(outputElement, index);
+                    List<SchemaField> inputFields = inputSimple
+                            ? SchemaTrees.flatten(inputType, index.types())
+                            : elementSchemaFields.getOrDefault(inputElement, List.of());
+                    List<SchemaField> outputFields = outputSimple
+                            ? SchemaTrees.flatten(outputType, index.types())
+                            : elementSchemaFields.getOrDefault(outputElement, List.of());
 
                     List<SoapHeaderModel> inputHeaders = new ArrayList<>();
                     for (HeaderPart header : headerParts(definition, inputMessage, inputExtensions)) {
@@ -144,11 +153,13 @@ public class WsdlParser {
                             inputElement != null ? inputElement.toString() : null,
                             outputElement != null ? outputElement.toString() : null,
                             operation.getOutput() == null,
-                            index.elementTypes().get(inputElement),
-                            index.elementTypes().get(outputElement),
+                            inputType,
+                            outputType,
                             inputHeaders,
                             faults,
-                            index.types());
+                            index.types(),
+                            inputSimple,
+                            outputSimple);
                     result.add(new WsdlOperationModel(
                             operationName,
                             inputElement != null ? inputElement.getLocalPart() : operationName,
@@ -161,8 +172,8 @@ public class WsdlParser {
                             faults,
                             Documentation.of(operation.getDocumentationElement()),
                             endpoint,
-                            index.elementTypes().get(inputElement),
-                            index.elementTypes().get(outputElement),
+                            inputType,
+                            outputType,
                             index.types(),
                             contract
                     ));
@@ -181,6 +192,29 @@ public class WsdlParser {
         } finally {
             locator.close();
         }
+    }
+
+    /**
+     * The type of a body element; one of a simple type ({@code <xs:element name="echo" type="xs:string"/>}, common in
+     * BARE operations) as an object with that one value, under the element's name.
+     */
+    private static SchemaType bodyType(QName element, SchemaIndexer.SchemaIndex index) {
+        if (element == null) {
+            return null;
+        }
+        SchemaType type = index.elementTypes().get(element);
+        if (type != null || !isSimple(element, index)) {
+            return type;
+        }
+        SchemaField simple = index.simpleElements().get(element);
+        return new SchemaType(null, List.of(new SchemaProperty(element.getLocalPart(), simple.xsdType(),
+                simple.facets(), null, null, true, simple.collection(), false, null, null, null, List.of(),
+                SchemaProperty.Kind.ELEMENT, element.getNamespaceURI(), simple.collection(), null)), null);
+    }
+
+    private static boolean isSimple(QName element, SchemaIndexer.SchemaIndex index) {
+        return element != null && !index.elementTypes().containsKey(element)
+                && index.simpleElements().containsKey(element);
     }
 
     private static List<String> paths(List<SchemaField> fields) {

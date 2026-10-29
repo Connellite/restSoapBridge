@@ -12,6 +12,8 @@ import io.github.connellite.exception.UpstreamException;
 import io.github.connellite.mapper.xml.JsonToXml;
 import io.github.connellite.mapper.xml.XmlToJson;
 import io.github.connellite.model.MappingDefinition;
+import io.github.connellite.model.SchemaProperty;
+import io.github.connellite.model.SchemaTrees;
 import io.github.connellite.model.SoapFaultModel;
 import io.github.connellite.model.SoapHeaderModel;
 import io.github.connellite.model.SoapOperationContract;
@@ -114,8 +116,10 @@ public class SoapInvoker {
                                    List<String> errors) {
         JsonToXml writer = new JsonToXml(contract.types());
         Set<String> ignored = contract.headers().isEmpty() ? Set.of() : Set.of(headerRoot);
-        Element payload = writer.object(QName.valueOf(contract.inputElement()), contract.inputType(), body, "$", ignored,
-                "SOAP operation '" + operation + "'");
+        String owner = "SOAP operation '" + operation + "'";
+        Element payload = contract.inputSimple()
+                ? writer.simple(QName.valueOf(contract.inputElement()), contract.inputType(), body, ignored, owner)
+                : writer.object(QName.valueOf(contract.inputElement()), contract.inputType(), body, "$", ignored, owner);
         errors.addAll(writer.errors());
         return payload;
     }
@@ -166,7 +170,14 @@ public class SoapInvoker {
             return JsonNodeFactory.instance.objectNode();
         }
         validate(port, element, "SOAP response");
-        return new XmlToJson(contract.types()).object(element, contract.outputType());
+        XmlToJson reader = new XmlToJson(contract.types());
+        if (contract.outputSimple()) {
+            SchemaProperty value = contract.outputType().properties().get(0);
+            ObjectNode json = JsonNodeFactory.instance.objectNode();
+            json.set(SchemaTrees.restName(value.name()), reader.value(element, value));
+            return json;
+        }
+        return reader.object(element, contract.outputType());
     }
 
     /** The declared fault a detail entry stands for, matched by element name. */

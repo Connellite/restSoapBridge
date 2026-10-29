@@ -281,7 +281,10 @@ not enough. Anonymous types stay in place.
 | named or anonymous `xs:simpleType` restriction | the built-in base type plus its facets (`enum`, `pattern`, ...) |
 | `xs:list` | array of the item type |
 | `xs:group ref` | the group's elements inline |
-| `xs:choice` | all alternatives as optional fields, plus `oneOf` (required choice) or `not` two of them (optional choice); a repeating choice has no such constraint |
+| `xs:choice` | all alternatives as optional fields, plus `oneOf` (required choice) or `not` two of them (optional choice) |
+| repeating `xs:choice` / `xs:sequence` / `xs:group` (`maxOccurs > 1`) | each of its elements an array, without the `oneOf`; JSON keeps the values per element, not their interleaving |
+| `xs:any`, `xs:anyAttribute` | `additionalProperties: true`: undeclared elements and attributes are carried as they are, under their local names (elements as objects or text, repeated ones as arrays) |
+| body element of a simple type (BARE `String echo(String)`) | one field named after the element: `{"echo": "hi"}`, response `{"echoResponse": "hi!"}` |
 | `nillable="true"` | `nullable: true` |
 | `minOccurs`/`maxOccurs` of a repeating element | `minItems`/`maxItems` |
 | `xs:documentation`, `wsdl:documentation` | `description` of the property, the operation and the declared fault |
@@ -294,7 +297,7 @@ are an `integer` without format, `xs:time`, `xs:token`, the `g*` date types and 
 Faults the WSDL declares for an operation are published as problem schemas (`faultName` fixed to the fault,
 `faultInfo` shaped like the fault element) under the status `bridge.errors.fault-status` gives them (default `502`).
 
-`xs:any`, `xs:union` (published as a string) and substitution groups are not expanded.
+`xs:union` (published as a string) and substitution groups are not expanded.
 
 ### Version
 

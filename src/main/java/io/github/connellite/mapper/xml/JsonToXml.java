@@ -65,9 +65,10 @@ public final class JsonToXml {
         }
         List<SchemaProperty> properties = type != null ? type.properties() : List.of();
         List<String> unknown = new ArrayList<>();
+        boolean open = type != null && type.open();
         for (Iterator<String> names = value.fieldNames(); names.hasNext(); ) {
             String field = names.next();
-            if (!ignored.contains(field) && !value.get(field).isNull() && find(properties, field) == null) {
+            if (!open && !ignored.contains(field) && !value.get(field).isNull() && find(properties, field) == null) {
                 unknown.add(field);
             }
         }
@@ -76,9 +77,32 @@ public final class JsonToXml {
                     + properties.stream().map(property -> SchemaTrees.restName(property.name())).toList());
         }
         if (type != null) {
-            content(element, type, value, path);
+            content(element, type, value, path, ignored);
         }
         return finish(element);
+    }
+
+    /**
+     * A body element of a simple type: {@code type} holds it as its only property, whose JSON field carries the
+     * element's text ({@code {"echo": "hi"}} for {@code <echo>hi</echo>}).
+     */
+    public Element simple(QName name, SchemaType type, JsonNode body, Set<String> ignored, String owner) {
+        SchemaProperty property = type.properties().get(0);
+        String field = SchemaTrees.restName(property.name());
+        // A simple element has no room for undeclared content.
+        if (body != null && body.isObject()) {
+            List<String> unknown = new ArrayList<>();
+            body.fieldNames().forEachRemaining(candidate -> {
+                if (!candidate.equals(field) && !ignored.contains(candidate) && !body.get(candidate).isNull()) {
+                    unknown.add(candidate);
+                }
+            });
+            if (!unknown.isEmpty()) {
+                errors.add("Unknown parameter(s) " + unknown + " for " + owner + "; expected [" + field + "]");
+            }
+        }
+        JsonNode value = body != null && body.has(field) ? body.get(field) : JsonNodeFactory.instance.nullNode();
+        return value(name, property, value, "$." + field);
     }
 
     /** A header element of a simple type, or one whose content is described by a single property. */
@@ -89,7 +113,7 @@ public final class JsonToXml {
         }
         SchemaType type = typeOf(property);
         if (type != null) {
-            content(element, type, value, path);
+            content(element, type, value, path, Set.of());
         } else if (property.isComplex() || "object".equals(property.xsdType())) {
             untyped(element, value);
         } else {
@@ -98,7 +122,7 @@ public final class JsonToXml {
         return finish(element);
     }
 
-    private void content(Element element, SchemaType type, JsonNode value, String path) {
+    private void content(Element element, SchemaType type, JsonNode value, String path, Set<String> ignored) {
         if (!value.isObject()) {
             errors.add(path + ": " + XsdValues.jsonType(value) + " found, object expected");
             return;
@@ -128,6 +152,34 @@ public final class JsonToXml {
                 case ELEMENT -> element(element, property, field, fieldPath);
             }
         }
+        if (type.open()) {
+            undeclared(element, type, value, ignored);
+        }
+    }
+
+    /**
+     * Fields an open type ({@code xs:any}) does not declare, as child elements after the declared ones, in the
+     * namespace of the element that holds them.
+     */
+    private void undeclared(Element element, SchemaType type, JsonNode value, Set<String> ignored) {
+        value.fields().forEachRemaining(field -> {
+            if (ignored.contains(field.getKey()) || find(type.properties(), field.getKey()) != null) {
+                return;
+            }
+            List<JsonNode> items = new ArrayList<>();
+            if (field.getValue().isArray()) {
+                field.getValue().forEach(items::add);
+            } else {
+                items.add(field.getValue());
+            }
+            for (JsonNode item : items) {
+                Element child = element(element.getNamespaceURI(), field.getKey());
+                if (!item.isNull()) {
+                    untyped(child, item);
+                }
+                element.appendChild(child);
+            }
+        });
     }
 
     private void element(Element parent, SchemaProperty property, JsonNode value, String path) {
@@ -167,7 +219,7 @@ public final class JsonToXml {
     private void single(Element parent, SchemaProperty property, SchemaType type, JsonNode value, String path) {
         Element child = child(parent, property);
         if (type != null) {
-            content(child, type, value, path);
+            content(child, type, value, path, Set.of());
         } else if (property.isComplex() || "object".equals(property.xsdType())) {
             untyped(child, value);
         } else {

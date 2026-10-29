@@ -16,6 +16,9 @@ import java.util.Map;
  * @param headers       SOAP headers of the request
  * @param faults        declared faults, recognised by their detail element
  * @param types         named types the types above refer to
+ * @param inputSimple   the request element is of a simple type: {@code inputType} holds it as its only property,
+ *                      named after the element, whose value is the element's text
+ * @param outputSimple  the same for the response element and {@code outputType}
  */
 public record SoapOperationContract(
         String operation,
@@ -26,12 +29,21 @@ public record SoapOperationContract(
         SchemaType outputType,
         List<SoapHeaderModel> headers,
         List<SoapFaultModel> faults,
-        Map<String, SchemaType> types
+        Map<String, SchemaType> types,
+        boolean inputSimple,
+        boolean outputSimple
 ) {
 
     public SoapOperationContract {
         headers = headers == null ? List.of() : List.copyOf(headers);
         faults = faults == null ? List.of() : List.copyOf(faults);
         types = types == null ? Map.of() : types;
+    }
+
+    public SoapOperationContract(String operation, String inputElement, String outputElement, boolean oneWay,
+                                 SchemaType inputType, SchemaType outputType, List<SoapHeaderModel> headers,
+                                 List<SoapFaultModel> faults, Map<String, SchemaType> types) {
+        this(operation, inputElement, outputElement, oneWay, inputType, outputType, headers, faults, types, false,
+                false);
     }
 }

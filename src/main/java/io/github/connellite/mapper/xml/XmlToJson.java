@@ -11,13 +11,16 @@ import io.github.connellite.model.SchemaTrees;
 import io.github.connellite.model.SchemaType;
 import org.w3c.dom.Attr;
 import org.w3c.dom.Element;
+import org.w3c.dom.NamedNodeMap;
 import org.w3c.dom.Node;
 
 import javax.xml.XMLConstants;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static io.github.connellite.service.auto.xsd.ParticleVisitor.MAP_TYPE;
 
@@ -63,7 +66,8 @@ public final class XmlToJson {
                     if (children.isEmpty()) {
                         continue;
                     }
-                    if (property.array() && !property.list()) {
+                    // More occurrences than the schema allows stay an array rather than being dropped.
+                    if ((property.array() && !property.list()) || children.size() > 1) {
                         ArrayNode items = json.putArray(name);
                         children.forEach(child -> items.add(value(child, property)));
                     } else {
@@ -72,7 +76,46 @@ public final class XmlToJson {
                 }
             }
         }
+        if (type.open()) {
+            addUndeclared(element, type, json);
+        }
         return json;
+    }
+
+    /**
+     * Content an open type ({@code xs:any}, {@code xs:anyAttribute}) does not declare: attributes and child elements
+     * under their local names, carried as they are (see {@link #untyped}).
+     */
+    private static void addUndeclared(Element element, SchemaType type, ObjectNode json) {
+        Set<String> declared = new HashSet<>();
+        type.properties().forEach(property -> declared.add(property.name()));
+        NamedNodeMap attributes = element.getAttributes();
+        for (int index = 0; index < attributes.getLength(); index++) {
+            Attr attribute = (Attr) attributes.item(index);
+            String namespace = attribute.getNamespaceURI();
+            String name = attribute.getLocalName() != null ? attribute.getLocalName() : attribute.getName();
+            if (XMLConstants.XMLNS_ATTRIBUTE_NS_URI.equals(namespace) || name.startsWith("xmlns")
+                    || XMLConstants.W3C_XML_SCHEMA_INSTANCE_NS_URI.equals(namespace)
+                    || declared.contains(name) || json.has(name)) {
+                continue;
+            }
+            json.put(name, attribute.getValue());
+        }
+        Map<String, List<JsonNode>> undeclared = new LinkedHashMap<>();
+        for (Element child : children(element, null)) {
+            String name = localName(child);
+            if (!declared.contains(name) && !json.has(name)) {
+                undeclared.computeIfAbsent(name, ignored -> new ArrayList<>())
+                        .add(isNil(child) ? NullNode.getInstance() : untyped(child));
+            }
+        }
+        undeclared.forEach((name, values) -> {
+            if (values.size() == 1) {
+                json.set(name, values.get(0));
+            } else {
+                values.forEach(json.putArray(name)::add);
+            }
+        });
     }
 
     /** The JSON of one element that {@code property} describes. */

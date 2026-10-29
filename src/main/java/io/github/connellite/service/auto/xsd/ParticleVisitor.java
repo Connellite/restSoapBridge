@@ -56,6 +56,10 @@ public class ParticleVisitor {
     private final Map<String, SchemaType> types;
     private final Set<String> building = new HashSet<>();
     private final Set<XmlSchemaComplexType> anonymousBuilding = Collections.newSetFromMap(new IdentityHashMap<>());
+    /** Repeating particles ({@code maxOccurs > 1}) around the content being collected, within its type. */
+    private int repeatingParticles;
+    /** The type being built takes undeclared content. */
+    private boolean open;
 
     /**
      * @param types registry of named types, by QName; filled as types are reached
@@ -73,7 +77,7 @@ public class ParticleVisitor {
     /** The type of a complex type; a named one is the registry entry. */
     public SchemaType type(XmlSchemaComplexType complexType, XmlSchema schema) {
         if (complexType.getQName() == null) {
-            return new SchemaType(null, content(complexType, schema), Documentation.of(complexType));
+            return content(complexType, schema, null);
         }
         return types.get(reference(complexType, schema));
     }
@@ -86,7 +90,7 @@ public class ParticleVisitor {
         String key = complexType.getQName().toString();
         if (!types.containsKey(key) && building.add(key)) {
             try {
-                types.put(key, new SchemaType(key, content(complexType, schema), Documentation.of(complexType)));
+                types.put(key, content(complexType, schema, key));
             } finally {
                 building.remove(key);
             }
@@ -94,10 +98,20 @@ public class ParticleVisitor {
         return key;
     }
 
-    private List<SchemaProperty> content(XmlSchemaComplexType complexType, XmlSchema schema) {
-        List<SchemaProperty> properties = new ArrayList<>();
-        collectTypeContent(complexType, schema, true, properties, new LinkedHashSet<>());
-        return properties;
+    /** The type of a complex type's content; types reached inside are built with their own state. */
+    private SchemaType content(XmlSchemaComplexType complexType, XmlSchema schema, String name) {
+        int outerRepeating = repeatingParticles;
+        boolean outerOpen = open;
+        repeatingParticles = 0;
+        open = false;
+        try {
+            List<SchemaProperty> properties = new ArrayList<>();
+            collectTypeContent(complexType, schema, true, properties, new LinkedHashSet<>());
+            return new SchemaType(name, properties, Documentation.of(complexType), open);
+        } finally {
+            repeatingParticles = outerRepeating;
+            open = outerOpen;
+        }
     }
 
     /**
@@ -116,6 +130,11 @@ public class ParticleVisitor {
         XmlSchemaContent content = complexType.getContentModel() != null
                 ? complexType.getContentModel().getContent()
                 : null;
+        if (complexType.getAnyAttribute() != null
+                || content instanceof XmlSchemaComplexContentExtension withAny && withAny.getAnyAttribute() != null
+                || content instanceof XmlSchemaSimpleContentExtension simpleWithAny && simpleWithAny.getAnyAttribute() != null) {
+            open = true;
+        }
         if (content instanceof XmlSchemaComplexContentExtension extension) {
             collectBaseTypeContent(extension.getBaseTypeName(), schema, required, properties, visitingBases);
             collectParticle(extension.getParticle(), schema, required, properties, visitingBases);
@@ -253,6 +272,31 @@ public class ParticleVisitor {
             collectElement(element, schema, parentRequired, properties);
             return;
         }
+        if (particle instanceof XmlSchemaAny) {
+            open = true;
+            return;
+        }
+        // The elements of a repeating sequence, choice or group occur as often as it does: arrays.
+        boolean repeats = particle.getMaxOccurs() > 1;
+        if (repeats) {
+            repeatingParticles++;
+        }
+        try {
+            collectParticleContent(particle, schema, parentRequired, properties, visitingBases);
+        } finally {
+            if (repeats) {
+                repeatingParticles--;
+            }
+        }
+    }
+
+    private void collectParticleContent(
+            XmlSchemaParticle particle,
+            XmlSchema schema,
+            boolean parentRequired,
+            List<SchemaProperty> properties,
+            Set<String> visitingBases
+    ) {
         boolean required = parentRequired && particle.getMinOccurs() > 0;
         if (particle instanceof XmlSchemaSequence sequence) {
             for (XmlSchemaSequenceMember item : sequence.getItems()) {
@@ -344,11 +388,13 @@ public class ParticleVisitor {
             return;
         }
 
-        boolean collection = isRepeating(element);
+        boolean ownRepetition = isRepeating(element) && repeatingParticles == 0;
+        boolean collection = isRepeating(element) || repeatingParticles > 0;
         boolean required = parentRequired && element.getMinOccurs() > 0;
         boolean nillable = element.isNillable() || resolvedElement.isNillable();
-        Integer minItems = collection && element.getMinOccurs() > 0 ? (int) element.getMinOccurs() : null;
-        Integer maxItems = collection && element.getMaxOccurs() < Integer.MAX_VALUE ? (int) element.getMaxOccurs() : null;
+        // Bounds hold for the element's own repetition only, not for that of a particle around it.
+        Integer minItems = ownRepetition && element.getMinOccurs() > 0 ? (int) element.getMinOccurs() : null;
+        Integer maxItems = ownRepetition && element.getMaxOccurs() < Integer.MAX_VALUE ? (int) element.getMaxOccurs() : null;
         String documentation = firstText(Documentation.of(element), Documentation.of(resolvedElement));
         // A reference names a global element; a local one is qualified as its form says.
         String namespace = namespace(element.isRef() ? resolvedElement.getQName() : element.getWireName());
@@ -375,7 +421,7 @@ public class ParticleVisitor {
             SchemaType inline = null;
             if (anonymousBuilding.add(complexType)) {
                 try {
-                    inline = new SchemaType(null, content(complexType, schema), Documentation.of(complexType));
+                    inline = content(complexType, schema, null);
                 } finally {
                     anonymousBuilding.remove(complexType);
                 }

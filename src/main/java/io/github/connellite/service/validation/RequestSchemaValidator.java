@@ -170,7 +170,8 @@ public class RequestSchemaValidator {
         if (schema.get("properties") instanceof ObjectNode properties) {
             properties.fieldNames().forEachRemaining(rootFields::add);
         }
-        if (rejectUnknownFields) {
+        // An open type (xs:any) states additionalProperties itself.
+        if (rejectUnknownFields && !schema.has("additionalProperties")) {
             schema.put("additionalProperties", false);
         }
         return new CompiledSchema(SCHEMA_FACTORY.getSchema(schema, SCHEMA_CONFIG), List.copyOf(rootFields));

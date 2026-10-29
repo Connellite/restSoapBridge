@@ -100,6 +100,10 @@ public final class SchemaRenderer {
         if (!required.isEmpty()) {
             schema.required(required);
         }
+        if (type.open()) {
+            // xs:any / xs:anyAttribute: content the schema does not name is carried as it is.
+            schema.setAdditionalProperties(Boolean.TRUE);
+        }
         addChoiceConstraints(schema, choices, optionalChoices);
         return schema;
     }

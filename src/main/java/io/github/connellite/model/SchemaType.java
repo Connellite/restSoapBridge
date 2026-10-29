@@ -11,11 +11,17 @@ import java.util.List;
  *                      {@code null} for an anonymous one
  * @param properties    elements and attributes, base type content first
  * @param documentation {@code xs:documentation} of the type, or {@code null}
+ * @param open          the type takes content it does not declare ({@code xs:any}, {@code xs:anyAttribute}): such
+ *                      elements and attributes are carried as they are, under their local names
  */
-public record SchemaType(String name, List<SchemaProperty> properties, String documentation) {
+public record SchemaType(String name, List<SchemaProperty> properties, String documentation, boolean open) {
 
     public SchemaType {
         properties = properties == null ? List.of() : List.copyOf(properties);
+    }
+
+    public SchemaType(String name, List<SchemaProperty> properties, String documentation) {
+        this(name, properties, documentation, false);
     }
 
     /** Local part of {@link #name}, the name the type is published under; {@code null} for an anonymous type. */
