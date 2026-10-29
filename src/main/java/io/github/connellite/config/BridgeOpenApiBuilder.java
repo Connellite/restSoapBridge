@@ -2,6 +2,8 @@ package io.github.connellite.config;
 
 import io.github.connellite.model.MappingDefinition;
 import io.github.connellite.model.MappingRegistry;
+import io.github.connellite.model.SchemaField;
+import io.github.connellite.model.SchemaType;
 import io.github.connellite.model.SoapFaultModel;
 import io.github.connellite.service.auto.AutoMappingGenerator;
 import io.swagger.v3.oas.models.Components;
@@ -31,6 +33,8 @@ import org.springframework.boot.info.BuildProperties;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -43,6 +47,7 @@ import java.util.regex.Pattern;
 import static io.github.connellite.config.OpenApiExampleFactory.exampleMap;
 import static io.github.connellite.config.OpenApiExampleFactory.extractBodyField;
 import static io.github.connellite.config.OpenApiExampleFactory.schemaWithXsdExamples;
+import static io.github.connellite.config.OpenApiExampleFactory.xsdExample;
 
 @Component
 public class BridgeOpenApiBuilder {
@@ -89,21 +94,27 @@ public class BridgeOpenApiBuilder {
         //noinspection rawtypes
         Map<String, Schema> schemas = new LinkedHashMap<>();
         Set<String> tagNames = new LinkedHashSet<>();
+        TypeNames typeNames = TypeNames.assign(mappingRegistry.getMappings());
 
         for (MappingDefinition mapping : mappingRegistry.getMappings()) {
             String service = mapping.getSoap().getService();
             tagNames.add(service);
 
+            SchemaRenderer renderer = new SchemaRenderer(mapping.getSchemaTypes(),
+                    typeName -> typeNames.name(mapping.getSchemaTypes(), typeName));
             String requestSchemaName = schemaName(mapping, "Request");
             String responseSchemaName = schemaName(mapping, "Response");
             Iterable<String> requestPaths = schemaPaths(mapping.getRequestSchemaPaths(), mapping.getRequest().keySet());
             Iterable<String> responsePaths = schemaPaths(mapping.getResponseSchemaPaths(), mapping.getResponse().values());
-            ObjectSchema requestSchema = schemaWithXsdExamples(mapping.getRequestSchemaFields(), requestPaths);
-            ObjectSchema responseSchema = schemaWithXsdExamples(mapping.getResponseSchemaFields(), responsePaths);
+            ObjectSchema requestSchema = bodySchema(renderer, mapping.getRequestType(),
+                    mapping.getRequestSchemaFields(), requestPaths);
+            ObjectSchema responseSchema = bodySchema(renderer, mapping.getResponseType(),
+                    mapping.getResponseSchemaFields(), responsePaths);
             schemas.put(requestSchemaName, requestSchema);
             schemas.put(responseSchemaName, responseSchema);
-            Map<String, ObjectSchema> faultSchemas = faultSchemas(mapping);
+            Map<String, ObjectSchema> faultSchemas = faultSchemas(mapping, renderer);
             schemas.putAll(faultSchemas);
+            renderer.components().forEach(schemas::putIfAbsent);
 
             Operation operation = new Operation()
                     //.operationId(buildOperationId(mapping))
@@ -115,9 +126,11 @@ public class BridgeOpenApiBuilder {
             pathVariables.forEach(variable -> operation.addParametersItem(new PathParameter()
                     .name(variable)
                     .required(true)
-                    .schema(parameterSchema(requestSchema, variable))));
+                    .schema(parameterSchema(requestSchema, variable, schemas))));
             if (QUERY_METHODS.contains(mapping.getMethod().toUpperCase(Locale.ROOT))) {
-                queryParameters(requestSchema, "", pathVariables).forEach(operation::addParametersItem);
+                queryParameters(requestSchema, "", pathVariables, schemas,
+                        Collections.newSetFromMap(new IdentityHashMap<>()))
+                        .forEach(operation::addParametersItem);
             } else {
                 pathVariables.forEach(variable -> removeRequired(requestSchema, variable));
                 operation.requestBody(buildRequestBody(mapping, requestSchemaName, requestSchema));
@@ -157,6 +170,39 @@ public class BridgeOpenApiBuilder {
         return implementationVersion != null ? implementationVersion : "unknown";
     }
 
+    /**
+     * A request or response body: rendered from its type tree (named types as {@code $ref}) when the mapping has
+     * one, otherwise from the field paths; the example comes from the field paths either way.
+     */
+    private static ObjectSchema bodySchema(SchemaRenderer renderer, SchemaType type, List<SchemaField> fields,
+                                           Iterable<String> fallbackPaths) {
+        if (type == null) {
+            return schemaWithXsdExamples(fields, fallbackPaths);
+        }
+        ObjectSchema schema = renderer.object(type);
+        if (type.documentation() != null) {
+            schema.setDescription(type.documentation());
+        }
+        schema.setExample(fields != null && !fields.isEmpty() ? xsdExample(fields) : exampleMap(fallbackPaths));
+        return schema;
+    }
+
+    /** A component, or the {@code allOf} wrapper of one, resolved; any other schema as it is. */
+    @SuppressWarnings("rawtypes")
+    private static Schema<?> resolve(Schema<?> schema, Map<String, Schema> components) {
+        Schema<?> current = schema;
+        for (int depth = 0; current != null && depth < 8; depth++) {
+            if (current.get$ref() != null) {
+                current = components.get(current.get$ref().substring(SchemaRenderer.COMPONENTS.length()));
+            } else if (current.getType() == null && current.getAllOf() != null && current.getAllOf().size() == 1) {
+                current = (Schema<?>) current.getAllOf().get(0);
+            } else {
+                return current;
+            }
+        }
+        return current;
+    }
+
     private RequestBody buildRequestBody(MappingDefinition mapping, String schemaName, ObjectSchema schema) {
         Map<String, Object> example = schema.getExample() instanceof Map<?, ?> map
                 ? castExample(map)
@@ -175,7 +221,8 @@ public class BridgeOpenApiBuilder {
      * nested objects as dotted names ({@code customer.name}). Arrays of objects and maps have no query form.
      */
     @SuppressWarnings("rawtypes")
-    private static List<Parameter> queryParameters(Schema<?> schema, String prefix, List<String> pathVariables) {
+    private static List<Parameter> queryParameters(Schema<?> schema, String prefix, List<String> pathVariables,
+                                                   Map<String, Schema> components, Set<Schema<?>> visiting) {
         List<Parameter> parameters = new ArrayList<>();
         if (schema.getProperties() == null) {
             return parameters;
@@ -183,13 +230,17 @@ public class BridgeOpenApiBuilder {
         List<String> required = schema.getRequired() != null ? schema.getRequired() : List.of();
         for (Map.Entry<String, Schema> property : schema.getProperties().entrySet()) {
             String name = prefix + property.getKey();
-            Schema<?> value = property.getValue();
-            if (pathVariables.contains(name)) {
+            Schema<?> value = resolve(property.getValue(), components);
+            if (pathVariables.contains(name) || value == null) {
                 continue;
             }
             if ("object".equals(value.getType()) && value.getProperties() != null) {
-                parameters.addAll(queryParameters(value, name + ".", pathVariables));
-            } else if (isQueryValue(value)) {
+                // A type that contains itself has no finite query form: stop at its second occurrence.
+                if (visiting.add(value)) {
+                    parameters.addAll(queryParameters(value, name + ".", pathVariables, components, visiting));
+                    visiting.remove(value);
+                }
+            } else if (isQueryValue(value, components)) {
                 parameters.add(new QueryParameter()
                         .name(name)
                         .required(prefix.isEmpty() && required.contains(property.getKey()))
@@ -199,20 +250,22 @@ public class BridgeOpenApiBuilder {
         return parameters;
     }
 
-    private static boolean isQueryValue(Schema<?> schema) {
+    @SuppressWarnings("rawtypes")
+    private static boolean isQueryValue(Schema<?> schema, Map<String, Schema> components) {
         if (schema instanceof ArraySchema array) {
-            return array.getItems() != null && isQueryValue(array.getItems());
+            Schema<?> items = resolve(array.getItems(), components);
+            return items != null && isQueryValue(items, components);
         }
         return schema.getType() != null && !"object".equals(schema.getType());
     }
 
     /** Schema of the (possibly dotted) request field a path variable fills; a string when it is unknown. */
     @SuppressWarnings("rawtypes")
-    private static Schema<?> parameterSchema(Schema<?> schema, String dottedName) {
+    private static Schema<?> parameterSchema(Schema<?> schema, String dottedName, Map<String, Schema> components) {
         Schema<?> current = schema;
         for (String segment : dottedName.split("\\.")) {
             Map<String, Schema> properties = current.getProperties();
-            current = properties != null ? properties.get(segment) : null;
+            current = properties != null ? resolve(properties.get(segment), components) : null;
             if (current == null) {
                 return new StringSchema();
             }
@@ -234,10 +287,12 @@ public class BridgeOpenApiBuilder {
      * One problem schema per declared fault, as {@code GlobalExceptionHandler} writes it: {@code faultName} fixed
      * to the fault, {@code faultInfo} shaped like the fault detail element.
      */
-    private static Map<String, ObjectSchema> faultSchemas(MappingDefinition mapping) {
+    private static Map<String, ObjectSchema> faultSchemas(MappingDefinition mapping, SchemaRenderer renderer) {
         Map<String, ObjectSchema> schemas = new LinkedHashMap<>();
         for (SoapFaultModel fault : mapping.getFaults() != null ? mapping.getFaults() : List.<SoapFaultModel>of()) {
-            ObjectSchema faultInfo = schemaWithXsdExamples(fault.schemaFields(), List.of());
+            Schema<?> faultInfo = fault.type() != null
+                    ? renderer.type(fault.type())
+                    : schemaWithXsdExamples(fault.schemaFields(), List.of());
             ObjectSchema problem = new ObjectSchema();
             problem.addProperty("title", new StringSchema());
             problem.addProperty("status", new IntegerSchema());
@@ -252,7 +307,7 @@ public class BridgeOpenApiBuilder {
             Map<String, Object> example = new LinkedHashMap<>();
             example.put("title", "SOAP Fault");
             example.put("faultName", fault.name());
-            example.put("faultInfo", faultInfo.getExample());
+            example.put("faultInfo", xsdExample(fault.schemaFields()));
             problem.setExample(example);
             schemas.put(schemaName(mapping, "Fault_" + fault.name()), problem);
         }

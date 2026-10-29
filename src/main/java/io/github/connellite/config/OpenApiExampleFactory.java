@@ -2,6 +2,7 @@ package io.github.connellite.config;
 
 import io.github.connellite.model.SchemaFacets;
 import io.github.connellite.model.SchemaField;
+import io.github.connellite.model.SchemaTrees;
 import io.swagger.v3.oas.models.media.ArraySchema;
 import io.swagger.v3.oas.models.media.BooleanSchema;
 import io.swagger.v3.oas.models.media.IntegerSchema;
@@ -19,7 +20,6 @@ import java.time.LocalTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -43,25 +43,29 @@ public class OpenApiExampleFactory {
         return schema;
     }
 
+    /** A body schema from field paths alone (anonymous types only), with an example. */
     public static ObjectSchema schemaWithXsdExamples(Iterable<SchemaField> schemaFields, Iterable<String> fallbackBodyPaths) {
         if (schemaFields == null || !schemaFields.iterator().hasNext()) {
             return schemaWithExamples(fallbackBodyPaths);
         }
+        ObjectSchema schema = SchemaRenderer.withLocalNames(Map.of()).object(SchemaTrees.fromFields(schemaFields));
+        schema.setExample(xsdExample(schemaFields));
+        return schema;
+    }
 
-        SchemaNode root = new SchemaNode("", "object", false, false);
+    /** An example body built from field paths: enumeration values, range-fitting numbers, type samples. */
+    public static Map<String, Object> xsdExample(Iterable<SchemaField> schemaFields) {
         Map<String, Object> example = new LinkedHashMap<>();
+        if (schemaFields == null) {
+            return example;
+        }
         for (SchemaField field : schemaFields) {
             String path = extractBodyPath(field.path());
-            if (path.isBlank()) {
-                continue;
+            if (!path.isBlank()) {
+                setNestedExample(example, path, sampleValue(field));
             }
-            root.add(path, field);
-            setNestedExample(example, path, sampleValue(field));
         }
-
-        ObjectSchema schema = root.toObjectSchema();
-        schema.setExample(example);
-        return schema;
+        return example;
     }
 
     public static Map<String, Object> exampleMap(Iterable<String> bodyPaths) {
@@ -277,176 +281,6 @@ public class OpenApiExampleFactory {
             root.put(segment, child);
         }
         return ensureMap(child, path.substring(dotIndex + 1));
-    }
-
-    private static final class SchemaNode {
-
-        private final String name;
-        private String xsdType;
-        private SchemaFacets facets = SchemaFacets.NONE;
-        private boolean required;
-        private boolean array;
-        private boolean nillable;
-        private Integer minItems;
-        private Integer maxItems;
-        private String documentation;
-        private final Map<String, SchemaNode> children = new LinkedHashMap<>();
-        /** {@code xs:choice} groups of this object: alternative index → member properties, in order. */
-        private final Map<String, Map<Integer, Set<String>>> choices = new LinkedHashMap<>();
-        private final Map<String, Boolean> optionalChoices = new LinkedHashMap<>();
-
-        private SchemaNode(String name, String xsdType, boolean required, boolean array) {
-            this.name = name;
-            this.xsdType = xsdType;
-            this.required = required;
-            this.array = array;
-        }
-
-        private void add(String path, SchemaField field) {
-            String[] segments = path.split("\\.");
-            SchemaNode current = this;
-            for (int index = 0; index < segments.length; index++) {
-                String segment = segments[index];
-                boolean segmentArray = segment.endsWith("[]");
-                String segmentName = segmentArray ? segment.substring(0, segment.length() - 2) : segment;
-                boolean leaf = index == segments.length - 1;
-
-                SchemaNode child = current.children.computeIfAbsent(segmentName,
-                        key -> new SchemaNode(key, leaf ? field.xsdType() : "object", field.required(), segmentArray));
-                child.required = child.required || field.required();
-                child.array = child.array || segmentArray || (leaf && field.collection());
-                if (leaf) {
-                    child.xsdType = field.xsdType();
-                    child.facets = field.facets();
-                    child.nillable = field.nillable();
-                    child.minItems = field.minItems();
-                    child.maxItems = field.maxItems();
-                    child.documentation = field.documentation();
-                }
-                current = child;
-            }
-            addChoices(segments, field);
-        }
-
-        /** Registers the member of each choice the field belongs to with the object that holds the choice. */
-        private void addChoices(String[] segments, SchemaField field) {
-            for (SchemaField.ChoiceRef choice : field.choices()) {
-                if (choice.depth() >= segments.length) {
-                    continue;
-                }
-                SchemaNode holder = this;
-                for (int index = 0; index < choice.depth() && holder != null; index++) {
-                    holder = holder.children.get(stripArray(segments[index]));
-                }
-                if (holder == null) {
-                    continue;
-                }
-                holder.choices.computeIfAbsent(choice.group(), key -> new LinkedHashMap<>())
-                        .computeIfAbsent(choice.alternative(), key -> new LinkedHashSet<>())
-                        .add(stripArray(segments[choice.depth()]));
-                holder.optionalChoices.merge(choice.group(), choice.optional(), Boolean::logicalOr);
-            }
-        }
-
-        private static String stripArray(String segment) {
-            return segment.endsWith("[]") ? segment.substring(0, segment.length() - 2) : segment;
-        }
-
-        private ObjectSchema toObjectSchema() {
-            ObjectSchema schema = new ObjectSchema();
-            List<String> requiredFields = new ArrayList<>();
-            for (SchemaNode child : children.values()) {
-                schema.addProperty(child.name, child.toSchema());
-                if (child.required) {
-                    requiredFields.add(child.name);
-                }
-            }
-            if (!requiredFields.isEmpty()) {
-                schema.required(requiredFields);
-            }
-            addChoiceConstraints(schema);
-            return schema;
-        }
-
-        /**
-         * {@code xs:choice}: exactly one alternative ({@code oneOf}) when the choice is required, at most one
-         * ({@code not} two of them) when it is optional. Several choices of one object are combined with
-         * {@code allOf}. An alternative counts as sent when one of its members is.
-         */
-        @SuppressWarnings("rawtypes")
-        private void addChoiceConstraints(ObjectSchema schema) {
-            List<Schema> constraints = new ArrayList<>();
-            choices.forEach((group, alternatives) -> {
-                if (alternatives.size() < 2) {
-                    return;
-                }
-                List<Schema> present = alternatives.values().stream().map(SchemaNode::present).toList();
-                if (!optionalChoices.getOrDefault(group, false)) {
-                    constraints.add(new Schema<>().oneOf(present));
-                    return;
-                }
-                List<Schema> pairs = new ArrayList<>();
-                for (int first = 0; first < present.size(); first++) {
-                    for (int second = first + 1; second < present.size(); second++) {
-                        pairs.add(both(present.get(first), present.get(second)));
-                    }
-                }
-                constraints.add(new Schema<>().not(pairs.size() == 1 ? pairs.get(0) : new Schema<>().anyOf(pairs)));
-            });
-            if (constraints.size() == 1 && constraints.get(0).getOneOf() != null) {
-                schema.setOneOf(constraints.get(0).getOneOf());
-            } else if (constraints.size() == 1) {
-                schema.setNot(constraints.get(0).getNot());
-            } else if (!constraints.isEmpty()) {
-                schema.setAllOf(constraints);
-            }
-        }
-
-        /** Both alternatives sent: one {@code required} list when each has a single member. */
-        @SuppressWarnings({"rawtypes", "unchecked"})
-        private static Schema both(Schema first, Schema second) {
-            if (first.getRequired() != null && second.getRequired() != null) {
-                List<String> members = new ArrayList<>(first.getRequired());
-                members.addAll(second.getRequired());
-                return new Schema<>().required(members);
-            }
-            return new Schema<>().allOf(List.of(first, second));
-        }
-
-        @SuppressWarnings("rawtypes")
-        private static Schema present(Set<String> members) {
-            if (members.size() == 1) {
-                return new Schema<>().required(List.copyOf(members));
-            }
-            return new Schema<>().anyOf(members.stream().map(member -> (Schema) new Schema<>().required(List.of(member)))
-                    .toList());
-        }
-
-        private Schema<?> toSchema() {
-            Schema<?> schema = children.isEmpty() ? withFacets(scalarSchema(xsdType), facets) : toObjectSchema();
-            if (nillable) {
-                schema.setNullable(true);
-            }
-            if (!array) {
-                if (documentation != null) {
-                    schema.setDescription(describe(schema.getDescription()));
-                }
-                return schema;
-            }
-            ArraySchema arraySchema = new ArraySchema();
-            arraySchema.setItems(schema);
-            arraySchema.setMinItems(minItems);
-            arraySchema.setMaxItems(maxItems);
-            if (documentation != null) {
-                arraySchema.setDescription(documentation);
-            }
-            return arraySchema;
-        }
-
-        /** The XSD documentation ahead of a note the schema already carries (e.g. the JAXB map shape). */
-        private String describe(String existing) {
-            return existing == null ? documentation : documentation + "\n\n" + existing;
-        }
     }
 
     /**

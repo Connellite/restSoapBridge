@@ -12,6 +12,7 @@ import com.networknt.schema.SpecVersion;
 import com.networknt.schema.ValidationMessage;
 import io.github.connellite.config.BridgeProperties;
 import io.github.connellite.config.OpenApiExampleFactory;
+import io.github.connellite.config.SchemaRenderer;
 import io.github.connellite.exception.RequestValidationException;
 import io.github.connellite.model.MappingDefinition;
 import io.github.connellite.model.SchemaField;
@@ -63,7 +64,7 @@ public class RequestSchemaValidator {
         }
         Optional<CompiledSchema> schema = schemas.computeIfAbsent(
                 mapping.getMethod() + " " + mapping.getPath(),
-                ignored -> compile(mapping.getRequestSchemaFields(), validation.isRejectUnknownFields()));
+                ignored -> compile(mapping, validation.isRejectUnknownFields()));
         if (schema.isEmpty()) {
             return;
         }
@@ -83,6 +84,73 @@ public class RequestSchemaValidator {
     }
 
     /**
+     * The request type tree when the mapping has one: named types become {@code definitions} the schema refers to
+     * (so a type may contain itself); otherwise the field paths.
+     */
+    static Optional<CompiledSchema> compile(MappingDefinition mapping, boolean rejectUnknownFields) {
+        if (mapping.getRequestType() == null) {
+            return compile(mapping.getRequestSchemaFields(), rejectUnknownFields);
+        }
+        if (mapping.getRequestType().properties().isEmpty()) {
+            return Optional.empty();
+        }
+        SchemaRenderer renderer = SchemaRenderer.withLocalNames(mapping.getSchemaTypes());
+        ObjectNode schema = Json.mapper().valueToTree(renderer.object(mapping.getRequestType()));
+        ObjectNode definitions = JsonNodeFactory.instance.objectNode();
+        renderer.components().forEach((name, component) -> definitions.set(name, Json.mapper().valueToTree(component)));
+        toDefinitionReferences(schema);
+        toDefinitionReferences(definitions);
+        inlineEntryItems(schema, definitions);
+        definitions.forEach(definition -> inlineEntryItems(definition, definitions));
+        toValidationSchema(schema);
+        definitions.fields().forEachRemaining(definition -> toValidationSchema((ObjectNode) definition.getValue()));
+        if (!definitions.isEmpty()) {
+            schema.set("definitions", definitions);
+        }
+        return Optional.of(finish(schema, rejectUnknownFields));
+    }
+
+    /** {@code #/components/schemas/X} (OpenAPI) as {@code #/definitions/X} (draft-07), at any depth. */
+    private static void toDefinitionReferences(JsonNode node) {
+        if (node instanceof ObjectNode object) {
+            JsonNode reference = object.get("$ref");
+            if (reference != null && reference.isTextual() && reference.asText().startsWith(COMPONENTS)) {
+                object.put("$ref", "#/definitions/" + reference.asText().substring(COMPONENTS.length()));
+            }
+            object.elements().forEachRemaining(RequestSchemaValidator::toDefinitionReferences);
+        } else if (node instanceof ArrayNode array) {
+            array.forEach(RequestSchemaValidator::toDefinitionReferences);
+        }
+    }
+
+    private static final String COMPONENTS = "#/components/schemas/";
+
+    /**
+     * Items of a named {@code key}/{@code value} type in place of the reference: a JAXB entry list also takes the
+     * plain-object shape (see {@link #allowKeyValueAlternative}), which is decided on the items schema itself.
+     */
+    private static void inlineEntryItems(JsonNode node, ObjectNode definitions) {
+        if (node instanceof ObjectNode object) {
+            JsonNode items = object.path("items");
+            // A nillable item is an allOf wrapper around the reference.
+            JsonNode target = items.path("allOf").size() == 1 ? items.path("allOf").get(0) : items;
+            String reference = target.path("$ref").asText("");
+            if (reference.startsWith("#/definitions/")
+                    && definitions.get(reference.substring("#/definitions/".length())) instanceof ObjectNode definition
+                    && isEntrySchema(definition)) {
+                ObjectNode inlined = definition.deepCopy();
+                if (items.path("nullable").asBoolean(false)) {
+                    inlined.put("nullable", true);
+                }
+                object.set("items", inlined);
+            }
+            object.elements().forEachRemaining(child -> inlineEntryItems(child, definitions));
+        } else if (node instanceof ArrayNode array) {
+            array.forEach(child -> inlineEntryItems(child, definitions));
+        }
+    }
+
+    /**
      * Without XSD field metadata there is no reliable type information, so such operations are not validated.
      * Unknown fields are rejected at the top level only: nested types may come from XSD constructs the field
      * index does not expand (e.g. {@code xs:any}, substitution groups), and a false 400 there would block valid
@@ -94,6 +162,10 @@ public class RequestSchemaValidator {
         }
         ObjectNode schema = Json.mapper().valueToTree(OpenApiExampleFactory.schemaWithXsdExamples(requestFields, List.of()));
         toValidationSchema(schema);
+        return Optional.of(finish(schema, rejectUnknownFields));
+    }
+
+    private static CompiledSchema finish(ObjectNode schema, boolean rejectUnknownFields) {
         List<String> rootFields = new ArrayList<>();
         if (schema.get("properties") instanceof ObjectNode properties) {
             properties.fieldNames().forEachRemaining(rootFields::add);
@@ -101,7 +173,7 @@ public class RequestSchemaValidator {
         if (rejectUnknownFields) {
             schema.put("additionalProperties", false);
         }
-        return Optional.of(new CompiledSchema(SCHEMA_FACTORY.getSchema(schema, SCHEMA_CONFIG), List.copyOf(rootFields)));
+        return new CompiledSchema(SCHEMA_FACTORY.getSchema(schema, SCHEMA_CONFIG), List.copyOf(rootFields));
     }
 
     record CompiledSchema(JsonSchema schema, List<String> rootFields) {
@@ -295,6 +367,13 @@ public class RequestSchemaValidator {
         if (type != null && type.isTextual()) {
             property.putArray("type").add(type.asText()).add("null");
         } else if (property.get("anyOf") instanceof ArrayNode anyOf) {
+            anyOf.addObject().put("type", "null");
+        } else if (property.has("$ref") || property.has("allOf")) {
+            // A named type ($ref, or the allOf wrapper that carries its description).
+            ObjectNode value = property.deepCopy();
+            property.removeAll();
+            ArrayNode anyOf = property.putArray("anyOf");
+            anyOf.add(value);
             anyOf.addObject().put("type", "null");
         }
     }

@@ -119,8 +119,11 @@ class BackendFailureIntegrationTest {
             assertEquals(List.of("ConflictException"), create.getFaults().stream().map(SoapFaultModel::name).toList());
             Schema<?> problem = openApi.getComponents().getSchemas().get("Failures_createFault_ConflictException");
             assertEquals(List.of("ConflictException"), problem.getProperties().get("faultName").getEnum());
+            // The fault bean type is a named XSD type: published once as a component.
             Schema<?> faultInfo = (Schema<?>) problem.getProperties().get("faultInfo");
-            assertTrue(faultInfo.getProperties().containsKey("code"), faultInfo.toString());
+            assertEquals("#/components/schemas/ConflictException", faultInfo.get$ref());
+            Schema<?> faultBean = openApi.getComponents().getSchemas().get("ConflictException");
+            assertTrue(faultBean.getProperties().containsKey("code"), faultBean.toString());
             ApiResponse conflict = openApi.getPaths().get("/api/Failures/create").getPost().getResponses().get("409");
             assertEquals("#/components/schemas/Failures_createFault_ConflictException",
                     conflict.getContent().get("application/problem+json").getSchema().get$ref());

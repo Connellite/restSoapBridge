@@ -5,6 +5,9 @@ import io.github.connellite.config.WsdlUrlCollector;
 import io.github.connellite.model.DiscoveredSoapService;
 import io.github.connellite.model.MappingDefinition;
 import io.github.connellite.model.SchemaField;
+import io.github.connellite.model.SchemaProperty;
+import io.github.connellite.model.SchemaTrees;
+import io.github.connellite.model.SchemaType;
 import io.github.connellite.model.SoapHeaderModel;
 import io.github.connellite.model.WsdlOperationModel;
 import lombok.RequiredArgsConstructor;
@@ -19,6 +22,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -169,6 +173,9 @@ public class AutoMappingGenerator {
             }
         }
         mapping.setHeaderRequest(headerRequest);
+        mapping.setRequestType(requestType(operation, headerRoot));
+        mapping.setResponseType(operation.outputType());
+        mapping.setSchemaTypes(operation.types());
         mapping.setRequestSchemaPaths(requestSchemaPaths);
         mapping.setRequestSchemaFields(toRestSchemaFields(requestSchemaFields));
 
@@ -197,6 +204,33 @@ public class AutoMappingGenerator {
         ));
 
         return mapping;
+    }
+
+    /**
+     * The REST request body as a type: the fields of the request element plus, when the binding declares SOAP
+     * headers, the optional headers object (which shadows a body field of its name).
+     */
+    private static SchemaType requestType(WsdlOperationModel operation, String headerRoot) {
+        if (operation.inputType() == null && operation.inputHeaders().isEmpty()) {
+            return null;
+        }
+        List<SchemaProperty> properties = new ArrayList<>();
+        if (operation.inputType() != null) {
+            operation.inputType().properties().stream()
+                    .filter(property -> operation.inputHeaders().isEmpty() || !property.name().equals(headerRoot))
+                    .forEach(properties::add);
+        }
+        if (!operation.inputHeaders().isEmpty()) {
+            List<SchemaProperty> headers = operation.inputHeaders().stream()
+                    .map(SoapHeaderModel::property)
+                    .filter(Objects::nonNull)
+                    .toList();
+            properties.add(new SchemaProperty(headerRoot, "object", null, null, new SchemaType(null, headers,
+                    "SOAP headers declared in the WSDL binding, one property per header part"),
+                    false, false, false, null, null, null, List.of()));
+        }
+        return new SchemaType(null, properties,
+                operation.inputType() != null ? operation.inputType().documentation() : null);
     }
 
     private static List<SchemaField> toRestSchemaFields(
@@ -243,11 +277,7 @@ public class AutoMappingGenerator {
      * the plain name. SOAP paths keep the XSD name, and arguments are matched with the same normalization.
      */
     private static String restFieldName(String segment) {
-        int start = 0;
-        while (start < segment.length() - 1 && segment.charAt(start) == '_' && segment.charAt(start + 1) != '[') {
-            start++;
-        }
-        return segment.substring(start);
+        return SchemaTrees.restName(segment);
     }
 
     private static String toSoapJsonPath(String inputElement, String field) {

@@ -1,0 +1,70 @@
+package io.github.connellite.model;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * One element or attribute of a {@link SchemaType}. Its value is a named type ({@link #typeName}), an anonymous one
+ * ({@link #inlineType}) or, with neither, the scalar, {@code map} or untyped {@code object} {@link #xsdType} names.
+ *
+ * @param required      required within the object that holds it ({@code minOccurs > 0}, {@code use="required"})
+ * @param array         a repeating element or an {@code xs:list}
+ * @param minItems      {@code minOccurs} of a repeating element, {@code null} when it does not bound the array
+ * @param maxItems      {@code maxOccurs} of a repeating element, {@code null} for {@code unbounded}
+ * @param documentation {@code xs:documentation} of the element or attribute, or {@code null}
+ * @param choices       the {@code xs:choice}s of the holding object this property is an alternative of, outermost first
+ */
+public record SchemaProperty(
+        String name,
+        String xsdType,
+        SchemaFacets facets,
+        String typeName,
+        SchemaType inlineType,
+        boolean required,
+        boolean array,
+        boolean nillable,
+        Integer minItems,
+        Integer maxItems,
+        String documentation,
+        List<Choice> choices
+) {
+
+    public SchemaProperty {
+        facets = facets == null ? SchemaFacets.NONE : facets;
+        choices = choices == null ? List.of() : List.copyOf(choices);
+    }
+
+    public boolean isComplex() {
+        return typeName != null || inlineType != null;
+    }
+
+    public SchemaProperty withName(String newName) {
+        return new SchemaProperty(newName, xsdType, facets, typeName, inlineType, required, array, nillable, minItems,
+                maxItems, documentation, choices);
+    }
+
+    public SchemaProperty withRequired(boolean newRequired) {
+        return new SchemaProperty(name, xsdType, facets, typeName, inlineType, newRequired, array, nillable, minItems,
+                maxItems, documentation, choices);
+    }
+
+    /** This property as an alternative of one more, enclosing choice. */
+    public SchemaProperty withOuterChoice(Choice choice) {
+        List<Choice> all = new ArrayList<>();
+        all.add(choice);
+        all.addAll(choices);
+        return new SchemaProperty(name, xsdType, facets, typeName, inlineType, required, array, nillable, minItems,
+                maxItems, documentation, all);
+    }
+
+    /**
+     * Membership in an {@code xs:choice} of the holding object: at most one alternative may be sent, exactly one when
+     * the choice is required.
+     *
+     * @param group       id of the choice, unique within the holding object
+     * @param alternative index of the alternative this property belongs to
+     * @param optional    the choice may be left out ({@code minOccurs="0"}, an optional particle, an empty alternative)
+     */
+    public record Choice(String group, int alternative, boolean optional) {
+    }
+}

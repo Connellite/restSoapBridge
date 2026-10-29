@@ -1,6 +1,8 @@
 package io.github.connellite.service.auto.xsd;
 
 import io.github.connellite.model.SchemaField;
+import io.github.connellite.model.SchemaTrees;
+import io.github.connellite.model.SchemaType;
 import lombok.experimental.UtilityClass;
 import org.apache.ws.commons.schema.XmlSchema;
 import org.apache.ws.commons.schema.XmlSchemaCollection;
@@ -26,21 +28,46 @@ import java.util.Set;
 public class SchemaIndexer {
 
     /**
-     * Fields of the global elements of complex type, by element QName: two elements of one local name in
-     * different namespaces are different message parts.
+     * The global elements of a WSDL, by element QName (two elements of one local name in different namespaces are
+     * different message parts), with the named types they use.
+     *
+     * @param elementTypes   type of each global element of complex type that has fields
+     * @param elementFields  the same elements as field paths
+     * @param simpleElements global elements of a simple type (e.g. a {@code <token>} SOAP header) as a single field
+     *                       with an empty path
+     * @param types          named complex types by QName, shared by all elements of the WSDL
      */
-    public static Map<QName, List<SchemaField>> readElementSchemaFields(Definition definition) {
-        Map<QName, List<SchemaField>> result = new LinkedHashMap<>();
-        readSchemas(definition).forEach(schema -> indexSchema(schema, result));
-        return result;
+    public record SchemaIndex(
+            Map<QName, SchemaType> elementTypes,
+            Map<QName, List<SchemaField>> elementFields,
+            Map<QName, SchemaField> simpleElements,
+            Map<String, SchemaType> types
+    ) {
     }
 
-    /**
-     * Global elements of a simple type (e.g. a {@code <token>} SOAP header) as a single field with an empty path.
-     */
+    public static SchemaIndex readIndex(Definition definition) {
+        List<XmlSchema> schemas = readSchemas(definition);
+        Map<String, SchemaType> types = new LinkedHashMap<>();
+        ParticleVisitor visitor = new ParticleVisitor(types);
+        Map<QName, SchemaType> elementTypes = new LinkedHashMap<>();
+        Map<QName, List<SchemaField>> elementFields = new LinkedHashMap<>();
+        for (XmlSchema schema : schemas) {
+            indexSchema(schema, visitor, types, elementTypes, elementFields);
+        }
+        return new SchemaIndex(elementTypes, elementFields, readSimpleElements(schemas), types);
+    }
+
+    public static Map<QName, List<SchemaField>> readElementSchemaFields(Definition definition) {
+        return readIndex(definition).elementFields();
+    }
+
     public static Map<QName, SchemaField> readSimpleElements(Definition definition) {
+        return readSimpleElements(readSchemas(definition));
+    }
+
+    private static Map<QName, SchemaField> readSimpleElements(List<XmlSchema> schemas) {
         Map<QName, SchemaField> result = new LinkedHashMap<>();
-        for (XmlSchema schema : readSchemas(definition)) {
+        for (XmlSchema schema : schemas) {
             for (XmlSchemaElement element : schema.getElements().values()) {
                 if (element.getName() == null || ComplexTypeResolver.resolve(element, schema) != null) {
                     continue;
@@ -106,18 +133,22 @@ public class SchemaIndexer {
         return (documentBaseUri != null ? documentBaseUri : "") + "#types" + (index + 1);
     }
 
-    private static void indexSchema(XmlSchema schema, Map<QName, List<SchemaField>> result) {
+    private static void indexSchema(XmlSchema schema, ParticleVisitor visitor, Map<String, SchemaType> types,
+                                    Map<QName, SchemaType> elementTypes,
+                                    Map<QName, List<SchemaField>> elementFields) {
         for (XmlSchemaElement element : schema.getElements().values()) {
-            if (element.getName() == null) {
+            if (element.getName() == null || elementTypes.containsKey(element.getQName())) {
                 continue;
             }
             XmlSchemaComplexType complexType = ComplexTypeResolver.resolve(element, schema);
             if (complexType == null) {
                 continue;
             }
-            List<SchemaField> fields = ParticleVisitor.fieldPaths(complexType, schema);
+            SchemaType type = visitor.type(complexType, schema);
+            List<SchemaField> fields = SchemaTrees.flatten(type, types);
             if (!fields.isEmpty()) {
-                result.putIfAbsent(element.getQName(), fields);
+                elementTypes.put(element.getQName(), type);
+                elementFields.put(element.getQName(), fields);
             }
         }
     }

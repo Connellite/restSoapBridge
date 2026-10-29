@@ -27,6 +27,15 @@ public class MappingDefinition {
     private List<SoapFaultModel> faults = new ArrayList<>();
     /** {@code wsdl:documentation} of the operation, or {@code null}. */
     private String documentation;
+    /**
+     * Type tree of the REST request body (body fields plus the SOAP headers object); {@code null}: published from
+     * {@link #requestSchemaFields}.
+     */
+    private SchemaType requestType;
+    /** Type tree of the REST response body; {@code null}: published from {@link #responseSchemaFields}. */
+    private SchemaType responseType;
+    /** Named types the type trees refer to, by QName; shared by the operations of one WSDL. */
+    private Map<String, SchemaType> schemaTypes = Map.of();
 
     public void setRequest(Map<String, String> request) {
         this.request = request != null ? new LinkedHashMap<>(request) : new LinkedHashMap<>();

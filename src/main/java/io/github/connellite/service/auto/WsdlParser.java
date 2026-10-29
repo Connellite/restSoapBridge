@@ -6,7 +6,10 @@ import io.github.connellite.model.WsdlOperationModel;
 import io.github.connellite.model.SchemaField;
 import io.github.connellite.model.SoapHeaderModel;
 import io.github.connellite.config.BridgeProperties;
+import io.github.connellite.model.SchemaProperty;
+import io.github.connellite.model.SchemaType;
 import io.github.connellite.service.auto.xsd.Documentation;
+import io.github.connellite.service.auto.xsd.SchemaIndexer;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.DependsOn;
@@ -88,8 +91,9 @@ public class WsdlParser {
             reader.setFeature("javax.wsdl.verbose", false);
             Definition definition = readDefinition(reader, wsdlUrl);
 
-            Map<QName, List<SchemaField>> elementSchemaFields = XsdFieldIndex.readElementSchemaFields(definition);
-            Map<QName, SchemaField> simpleElements = XsdFieldIndex.readSimpleElements(definition);
+            SchemaIndexer.SchemaIndex index = SchemaIndexer.readIndex(definition);
+            Map<QName, List<SchemaField>> elementSchemaFields = index.elementFields();
+            Map<QName, SchemaField> simpleElements = index.simpleElements();
 
             SelectedPort selected = selectPort(definition, wsdlUrl, preferredPort);
             List<PortType> portTypes = selected != null
@@ -129,7 +133,8 @@ public class WsdlParser {
                                 : simpleElements.containsKey(header.element())
                                 ? List.of(simpleElements.get(header.element()))
                                 : List.of();
-                        inputHeaders.add(new SoapHeaderModel(header.part(), header.element().getLocalPart(), fields));
+                        inputHeaders.add(new SoapHeaderModel(header.part(), header.element().getLocalPart(), fields,
+                                headerProperty(header, index)));
                     }
 
                     result.add(new WsdlOperationModel(
@@ -141,9 +146,12 @@ public class WsdlParser {
                             paths(outputFields),
                             outputFields,
                             inputHeaders,
-                            faults(operation, elementSchemaFields, simpleElements),
+                            faults(operation, index),
                             Documentation.of(operation.getDocumentationElement()),
-                            endpoint
+                            endpoint,
+                            index.elementTypes().get(inputElement),
+                            index.elementTypes().get(outputElement),
+                            index.types()
                     ));
                 }
             }
@@ -265,8 +273,28 @@ public class WsdlParser {
      * Declared faults of an operation. The name is the one the bridge reports as {@code faultName}: the dynamic
      * client names the fault exception after the fault message (JAX-WS), as a Java class name.
      */
-    private static List<SoapFaultModel> faults(Operation operation, Map<QName, List<SchemaField>> elementSchemaFields,
-                                               Map<QName, SchemaField> simpleElements) {
+    /**
+     * A header part as an optional property: the element's type, its simple type, or an untyped object for an
+     * element without indexed fields (e.g. {@code xs:any} content).
+     */
+    private static SchemaProperty headerProperty(HeaderPart header, SchemaIndexer.SchemaIndex index) {
+        SchemaType type = index.elementTypes().get(header.element());
+        if (type != null) {
+            return new SchemaProperty(header.part(), "object", null, type.name(), type.name() == null ? type : null,
+                    false, false, false, null, null, type.documentation(), List.of());
+        }
+        SchemaField simple = index.simpleElements().get(header.element());
+        if (simple != null) {
+            return new SchemaProperty(header.part(), simple.xsdType(), simple.facets(), null, null, false,
+                    simple.collection(), false, null, null, null, List.of());
+        }
+        return new SchemaProperty(header.part(), "object", null, null, null, false, false, false, null, null, null,
+                List.of());
+    }
+
+    private static List<SoapFaultModel> faults(Operation operation, SchemaIndexer.SchemaIndex index) {
+        Map<QName, List<SchemaField>> elementSchemaFields = index.elementFields();
+        Map<QName, SchemaField> simpleElements = index.simpleElements();
         List<SoapFaultModel> faults = new ArrayList<>();
         for (Object value : operation.getFaults().values()) {
             Fault fault = (Fault) value;
@@ -286,7 +314,8 @@ public class WsdlParser {
                     ? List.of(simpleElements.get(part.getElementName()))
                     : List.of();
             faults.add(new SoapFaultModel(javaClassName(message.getQName().getLocalPart()), fields,
-                    Documentation.of(fault.getDocumentationElement())));
+                    Documentation.of(fault.getDocumentationElement()),
+                    part != null ? index.elementTypes().get(part.getElementName()) : null));
         }
         faults.sort(Comparator.comparing(SoapFaultModel::name));
         return faults;

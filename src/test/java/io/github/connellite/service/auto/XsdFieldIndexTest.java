@@ -70,8 +70,8 @@ class XsdFieldIndexTest {
         ), fields.get(new QName("urn:test", "createOrder")));
 
         Map<QName, List<SchemaField>> schemaFields = XsdFieldIndex.readElementSchemaFields(definition);
-        SchemaField.ChoiceRef email = new SchemaField.ChoiceRef("#choice5", 0, 0, false);
-        SchemaField.ChoiceRef phone = new SchemaField.ChoiceRef("#choice5", 1, 0, false);
+        SchemaField.ChoiceRef email = new SchemaField.ChoiceRef("#choice2", 0, 0, false);
+        SchemaField.ChoiceRef phone = new SchemaField.ChoiceRef("#choice2", 1, 0, false);
         assertEquals(List.of(
                 new SchemaField("customer.name", "string", true, false),
                 new SchemaField("customer.phone", "string", true, false),

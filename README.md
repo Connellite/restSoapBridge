@@ -138,7 +138,8 @@ before the SOAP call. A mismatch returns `400` with an `errors` list:
 {"title":"Invalid request body","status":400,"errors":["$.customer: required property 'name' not found","$.customer.age: string found, [integer, null] expected"]}
 ```
 
-Types and required fields are checked; optional fields and `nillable` elements may be `null`; `format` (date/time)
+Types and required fields are checked (a required field of an optional object is required once the object is
+sent); optional fields and `nillable` elements may be `null`; `format` (date/time)
 is not enforced. Repeating elements keep their `minOccurs`/`maxOccurs` as `minItems`/`maxItems`; of an `xs:choice`
 at most one alternative may be sent, exactly one when the choice is required (a member sent as `null` counts as not sent).
 XSD facets are checked as well: `xs:enumeration`, `xs:pattern`, length and numeric range facets
@@ -264,7 +265,11 @@ Dynamic CXF clients (one per WSDL) are cached with Caffeine. Metrics are publish
 JSON fields use XSD names, not Java names: JAXB annotations are honoured, so `return`, `class` or `item-id`
 appear in JSON as in the WSDL. XSD dates are written in their lexical form (`2024-01-02T03:04:05+03:00`).
 
-Swagger and validation follow the XSD shape JAXB binds to:
+Swagger and validation follow the XSD shape JAXB binds to. A named `xs:complexType` is published once, as a
+component under its XSD name (`#/components/schemas/Customer`), and every use refers to it by `$ref`; a type that
+contains itself refers to its own component, and validation follows it to any depth. Two different types of one
+name (other namespaces, other services) get the service name in front (`Orders_Item`), plus a number when that is
+not enough. Anonymous types stay in place.
 
 | XSD | JSON |
 |-----|------|
