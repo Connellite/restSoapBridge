@@ -1,5 +1,6 @@
 package io.github.connellite;
 
+import org.springframework.boot.Banner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.autoconfigure.web.servlet.error.ErrorMvcAutoConfiguration;
@@ -10,11 +11,13 @@ import org.springframework.boot.web.servlet.support.SpringBootServletInitializer
 public class RestSoapBridgeApplication extends SpringBootServletInitializer {
 
     public static void main(String[] args) {
-        SpringApplication.run(RestSoapBridgeApplication.class, args);
+        SpringApplication app = new SpringApplication(RestSoapBridgeApplication.class);
+        app.setBannerMode(Banner.Mode.OFF);
+        app.run(args);
     }
 
     @Override
     protected SpringApplicationBuilder configure(SpringApplicationBuilder application) {
-        return application.sources(RestSoapBridgeApplication.class);
+        return application.sources(RestSoapBridgeApplication.class).bannerMode(Banner.Mode.OFF);
     }
 }
