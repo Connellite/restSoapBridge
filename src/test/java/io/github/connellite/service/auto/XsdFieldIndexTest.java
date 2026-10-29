@@ -118,7 +118,7 @@ class XsdFieldIndexTest {
         SchemaField.ChoiceRef account = new SchemaField.ChoiceRef("#choice2", 1, 0, true);
         assertEquals(List.of(
                 new SchemaField("note", "string", true, false, null, true, null, null,
-                        "Free text,\nshown to the payee.", List.of()),
+                        "Free text, shown to the payee.", List.of()),
                 new SchemaField("tags[]", "string", true, true, null, false, 2, 5, null, List.of()),
                 new SchemaField("card", "string", false, false).withChoice(card),
                 new SchemaField("iban", "string", false, false).withChoice(account),

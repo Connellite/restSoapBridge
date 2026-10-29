@@ -1,6 +1,7 @@
 package io.github.connellite.service.auto.xsd;
 
 import io.github.connellite.model.SchemaField;
+import io.github.connellite.model.SchemaProperty;
 import io.github.connellite.model.SchemaTrees;
 import io.github.connellite.model.SchemaType;
 import lombok.experimental.UtilityClass;
@@ -8,6 +9,7 @@ import org.apache.ws.commons.schema.XmlSchema;
 import org.apache.ws.commons.schema.XmlSchemaCollection;
 import org.apache.ws.commons.schema.XmlSchemaComplexType;
 import org.apache.ws.commons.schema.XmlSchemaElement;
+import org.apache.ws.commons.schema.XmlSchemaType;
 import org.w3c.dom.Element;
 
 import javax.wsdl.Definition;
@@ -15,7 +17,9 @@ import javax.wsdl.Import;
 import javax.wsdl.Types;
 import javax.wsdl.extensions.schema.Schema;
 import javax.xml.XMLConstants;
+import javax.xml.XMLConstants;
 import javax.xml.namespace.QName;
+import java.util.function.BiFunction;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
@@ -36,12 +40,15 @@ public class SchemaIndexer {
      * @param simpleElements global elements of a simple type (e.g. a {@code <token>} SOAP header) as a single field
      *                       with an empty path
      * @param types          named complex types by QName, shared by all elements of the WSDL
+     * @param typeProperties the property an RPC part of a type ({@code <part name="id" type="xs:long"/>}) is, by part
+     *                       name and type QName
      */
     public record SchemaIndex(
             Map<QName, SchemaType> elementTypes,
             Map<QName, List<SchemaField>> elementFields,
             Map<QName, SchemaField> simpleElements,
-            Map<String, SchemaType> types
+            Map<String, SchemaType> types,
+            BiFunction<String, QName, SchemaProperty> typeProperties
     ) {
     }
 
@@ -54,7 +61,27 @@ public class SchemaIndexer {
         for (XmlSchema schema : schemas) {
             indexSchema(schema, visitor, types, elementTypes, elementFields);
         }
-        return new SchemaIndex(elementTypes, elementFields, readSimpleElements(schemas), types);
+        return new SchemaIndex(elementTypes, elementFields, readSimpleElements(schemas), types,
+                (name, type) -> typeProperty(name, type, schemas, visitor));
+    }
+
+    /**
+     * An RPC part as the unqualified accessor element it is on the wire: of a named complex type (published like any
+     * other), or of a simple one, built-in or derived.
+     */
+    private static SchemaProperty typeProperty(String name, QName type, List<XmlSchema> schemas,
+                                               ParticleVisitor visitor) {
+        XmlSchema schema = schemas.isEmpty() ? null : schemas.get(0);
+        XmlSchemaType resolved = schema != null && type != null && !XMLConstants.W3C_XML_SCHEMA_NS_URI.equals(
+                type.getNamespaceURI()) ? ComplexTypeResolver.lookupType(type, schema) : null;
+        if (resolved instanceof XmlSchemaComplexType complexType) {
+            SchemaType complex = visitor.type(complexType, schema);
+            return new SchemaProperty(name, "object", null, complex.name(), complex.name() == null ? complex : null,
+                    true, false, false, null, null, null, List.of(), SchemaProperty.Kind.ELEMENT, "", false, null);
+        }
+        SimpleTypeResolver.SimpleTypeInfo simple = SimpleTypeResolver.resolve(type, null, schema);
+        return new SchemaProperty(name, simple.xsdType(), simple.facets(), null, null, true, simple.list(), false,
+                null, null, null, List.of(), SchemaProperty.Kind.ELEMENT, "", simple.list(), null);
     }
 
     public static Map<QName, List<SchemaField>> readElementSchemaFields(Definition definition) {

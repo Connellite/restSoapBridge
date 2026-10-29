@@ -84,6 +84,15 @@ public class BridgeProperties {
          * and skips that source.
          */
         private boolean failOnUnavailable = true;
+        /** Spelling of the service and operation segments of generated paths. */
+        private PathStyle pathStyle = PathStyle.AS_IS;
+    }
+
+    public enum PathStyle {
+        /** As in the WSDL: {@code /api/UserService/getUserInfo}. */
+        AS_IS,
+        /** Lower case, words joined by dashes: {@code /api/user-service/get-user-info}. */
+        KEBAB_CASE
     }
 
     /**

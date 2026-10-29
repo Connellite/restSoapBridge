@@ -359,6 +359,38 @@ public class AutoMappingGenerator {
     }
 
     private String buildPath(String prefix, String serviceName, String operationName) {
-        return BridgeProperties.normalizePathPrefix(prefix) + "/" + serviceName + "/" + operationName;
+        boolean kebab = bridgeProperties.getAuto().getPathStyle() == BridgeProperties.PathStyle.KEBAB_CASE;
+        return BridgeProperties.normalizePathPrefix(prefix) + "/" + (kebab ? camelToKebab(serviceName) : serviceName)
+                + "/" + (kebab ? camelToKebab(operationName) : operationName);
+    }
+
+    /**
+     * Converts a WSDL name to a URL-safe kebab-case path segment. Handles camelCase, PascalCase, snake_case and mixed
+     * forms: underscores and uppercase letters both act as word separators; consecutive separators are collapsed to a
+     * single dash.
+     * <p>
+     * Adapted from Membrane API Gateway (Apache License 2.0):
+     * <a href="https://github.com/membrane/api-gateway/blob/2a3f9f13809774041cba4e34c3d1efd06b977c20/core/src/main/java/com/predic8/membrane/core/interceptor/wsdl2openapi/XsdDomUtil.java#L344-L364">XsdDomUtil.camelToKebab</a>.
+     */
+    static String camelToKebab(String name) {
+        StringBuilder result = new StringBuilder();
+        char previous = 0;
+        for (int index = 0; index < name.length(); index++) {
+            char current = name.charAt(index);
+            if (current == '_') {
+                if (!result.isEmpty() && result.charAt(result.length() - 1) != '-') {
+                    result.append('-');
+                }
+            } else if (Character.isUpperCase(current)) {
+                if (Character.isLowerCase(previous)) {
+                    result.append('-');
+                }
+                result.append(Character.toLowerCase(current));
+            } else {
+                result.append(current);
+            }
+            previous = current;
+        }
+        return result.toString();
     }
 }

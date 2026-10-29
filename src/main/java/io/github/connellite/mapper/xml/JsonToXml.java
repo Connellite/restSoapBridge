@@ -74,7 +74,7 @@ public final class JsonToXml {
         }
         if (!unknown.isEmpty()) {
             errors.add("Unknown parameter(s) " + unknown + " for " + owner + "; expected "
-                    + properties.stream().map(property -> SchemaTrees.restName(property.name())).toList());
+                    + properties.stream().map(SchemaProperty::jsonKey).toList());
         }
         if (type != null) {
             content(element, type, value, path, ignored);
@@ -88,7 +88,7 @@ public final class JsonToXml {
      */
     public Element simple(QName name, SchemaType type, JsonNode body, Set<String> ignored, String owner) {
         SchemaProperty property = type.properties().get(0);
-        String field = SchemaTrees.restName(property.name());
+        String field = property.jsonKey();
         // A simple element has no room for undeclared content.
         if (body != null && body.isObject()) {
             List<String> unknown = new ArrayList<>();
@@ -128,8 +128,8 @@ public final class JsonToXml {
             return;
         }
         for (SchemaProperty property : type.properties()) {
-            String name = SchemaTrees.restName(property.name());
-            JsonNode field = value.has(name) ? value.get(name) : value.get(property.name());
+            String name = property.jsonKey();
+            JsonNode field = value.has(name) || property.jsonName() != null ? value.get(name) : value.get(property.name());
             if (field == null) {
                 continue;
             }
@@ -332,7 +332,7 @@ public final class JsonToXml {
 
     private static SchemaProperty find(List<SchemaProperty> properties, String field) {
         for (SchemaProperty property : properties) {
-            if (property.name().equals(field) || SchemaTrees.restName(property.name()).equals(field)) {
+            if (property.jsonKey().equals(field) || property.jsonName() == null && property.name().equals(field)) {
                 return property;
             }
         }

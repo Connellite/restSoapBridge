@@ -180,9 +180,7 @@ public class BridgeOpenApiBuilder {
             return schemaWithXsdExamples(fields, fallbackPaths);
         }
         ObjectSchema schema = renderer.object(type);
-        if (type.documentation() != null) {
-            schema.setDescription(type.documentation());
-        }
+        SchemaRenderer.document(schema, type.documentation());
         schema.setExample(fields != null && !fields.isEmpty() ? xsdExample(fields) : exampleMap(fallbackPaths));
         return schema;
     }

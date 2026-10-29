@@ -32,10 +32,12 @@ import javax.wsdl.extensions.soap.SOAPAddress;
 import javax.wsdl.extensions.soap.SOAPBinding;
 import javax.wsdl.extensions.soap.SOAPBody;
 import javax.wsdl.extensions.soap.SOAPHeader;
+import javax.wsdl.extensions.soap.SOAPOperation;
 import javax.wsdl.extensions.soap12.SOAP12Address;
 import javax.wsdl.extensions.soap12.SOAP12Binding;
 import javax.wsdl.extensions.soap12.SOAP12Body;
 import javax.wsdl.extensions.soap12.SOAP12Header;
+import javax.wsdl.extensions.soap12.SOAP12Operation;
 import javax.wsdl.factory.WSDLFactory;
 import javax.wsdl.xml.WSDLReader;
 import javax.xml.namespace.QName;
@@ -123,17 +125,26 @@ public class WsdlParser {
                     List<?> outputExtensions = binding != null && binding.getBindingOutput() != null
                             ? binding.getBindingOutput().getExtensibilityElements()
                             : List.of();
-                    QName inputElement = bodyElement(inputMessage, inputExtensions);
-                    QName outputElement = bodyElement(outputMessage, outputExtensions);
-                    SchemaType inputType = bodyType(inputElement, index);
-                    SchemaType outputType = bodyType(outputElement, index);
+                    boolean rpc = isRpc(binding, selected != null ? selected.binding() : null);
+                    QName inputElement = rpc
+                            ? rpcWrapper(definition, inputExtensions, operationName)
+                            : bodyElement(inputMessage, inputExtensions);
+                    QName outputElement = rpc
+                            ? (outputMessage != null ? rpcWrapper(definition, outputExtensions, operationName + "Response") : null)
+                            : bodyElement(outputMessage, outputExtensions);
+                    SchemaType inputType = rpc
+                            ? rpcType(inputMessage, inputExtensions, index)
+                            : bodyType(inputElement, index);
+                    SchemaType outputType = rpc
+                            ? rpcType(outputMessage, outputExtensions, index)
+                            : bodyType(outputElement, index);
                     boolean inputSimple = isSimple(inputElement, index);
                     boolean outputSimple = isSimple(outputElement, index);
-                    List<SchemaField> inputFields = inputSimple
-                            ? SchemaTrees.flatten(inputType, index.types())
+                    List<SchemaField> inputFields = inputSimple || rpc
+                            ? flatten(inputType, index)
                             : elementSchemaFields.getOrDefault(inputElement, List.of());
-                    List<SchemaField> outputFields = outputSimple
-                            ? SchemaTrees.flatten(outputType, index.types())
+                    List<SchemaField> outputFields = outputSimple || rpc
+                            ? flatten(outputType, index)
                             : elementSchemaFields.getOrDefault(outputElement, List.of());
 
                     List<SoapHeaderModel> inputHeaders = new ArrayList<>();
@@ -210,6 +221,81 @@ public class WsdlParser {
         return new SchemaType(null, List.of(new SchemaProperty(element.getLocalPart(), simple.xsdType(),
                 simple.facets(), null, null, true, simple.collection(), false, null, null, null, List.of(),
                 SchemaProperty.Kind.ELEMENT, element.getNamespaceURI(), simple.collection(), null)), null);
+    }
+
+    private static List<SchemaField> flatten(SchemaType type, SchemaIndexer.SchemaIndex index) {
+        return type != null ? SchemaTrees.flatten(type, index.types()) : List.of();
+    }
+
+    /** RPC style, as the binding operation or else the binding says; document style by default. */
+    private static boolean isRpc(BindingOperation operation, Binding binding) {
+        if (operation != null) {
+            for (Object extension : operation.getExtensibilityElements()) {
+                if (extension instanceof SOAPOperation soap && soap.getStyle() != null) {
+                    return "rpc".equalsIgnoreCase(soap.getStyle());
+                }
+                if (extension instanceof SOAP12Operation soap && soap.getStyle() != null) {
+                    return "rpc".equalsIgnoreCase(soap.getStyle());
+                }
+            }
+        }
+        if (binding != null) {
+            for (Object extension : binding.getExtensibilityElements()) {
+                if (extension instanceof SOAPBinding soap) {
+                    return "rpc".equalsIgnoreCase(soap.getStyle());
+                }
+                if (extension instanceof SOAP12Binding soap) {
+                    return "rpc".equalsIgnoreCase(soap.getStyle());
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The wrapper element of an RPC message: named after the operation ({@code ...Response} for the response), in the
+     * namespace of {@code soap:body}, the target namespace of the WSDL when it names none.
+     */
+    private static QName rpcWrapper(Definition definition, List<?> bindingExtensions, String localName) {
+        String namespace = null;
+        for (Object extension : bindingExtensions) {
+            if (extension instanceof SOAPBody body) {
+                namespace = body.getNamespaceURI();
+            } else if (extension instanceof SOAP12Body body) {
+                namespace = body.getNamespaceURI();
+            }
+        }
+        if (namespace == null || namespace.isEmpty()) {
+            namespace = definition.getTargetNamespace() != null ? definition.getTargetNamespace() : "";
+        }
+        return new QName(namespace, localName);
+    }
+
+    /**
+     * The content of an RPC wrapper: one unqualified accessor element per body part, in message order, typed by the
+     * part's {@code type} (or {@code element}).
+     * <p>
+     * Modelled on Membrane API Gateway (Apache License 2.0), which publishes such parts the same way:
+     * <a href="https://github.com/membrane/api-gateway/blob/2a3f9f13809774041cba4e34c3d1efd06b977c20/core/src/main/java/com/predic8/membrane/core/interceptor/wsdl2openapi/XsdToSchema.java#L258-L270">XsdToSchema.convertParts</a>.
+     */
+    private static SchemaType rpcType(Message message, List<?> bindingExtensions, SchemaIndexer.SchemaIndex index) {
+        if (message == null) {
+            return null;
+        }
+        List<SchemaProperty> properties = new ArrayList<>();
+        for (Part part : bodyParts(message, bindingExtensions)) {
+            if (part.getElementName() != null) {
+                SchemaType type = bodyType(part.getElementName(), index);
+                if (type != null) {
+                    properties.add(new SchemaProperty(part.getName(), "object", null, type.name(),
+                            type.name() == null ? type : null, true, false, false, null, null, null, List.of(),
+                            SchemaProperty.Kind.ELEMENT, "", false, null));
+                }
+            } else {
+                properties.add(index.typeProperties().apply(part.getName(), part.getTypeName()));
+            }
+        }
+        return new SchemaType(null, properties, null);
     }
 
     private static boolean isSimple(QName element, SchemaIndexer.SchemaIndex index) {
@@ -389,6 +475,16 @@ public class WsdlParser {
         if (message == null) {
             return null;
         }
+        for (Part part : bodyParts(message, bindingExtensions)) {
+            if (part.getElementName() != null) {
+                return part.getElementName();
+            }
+        }
+        return null;
+    }
+
+    /** Parts of a message that go into the SOAP body, in message order. */
+    private static List<Part> bodyParts(Message message, List<?> bindingExtensions) {
         List<?> bodyParts = null;
         Set<String> headerParts = new HashSet<>();
         for (Object extension : bindingExtensions) {
@@ -402,16 +498,17 @@ public class WsdlParser {
                 headerParts.add(header.getPart());
             }
         }
+        List<Part> parts = new ArrayList<>();
         for (Object value : message.getOrderedParts(null)) {
             Part part = (Part) value;
             boolean body = bodyParts != null && !bodyParts.isEmpty()
                     ? bodyParts.contains(part.getName())
                     : !headerParts.contains(part.getName());
-            if (body && part.getElementName() != null) {
-                return part.getElementName();
+            if (body) {
+                parts.add(part);
             }
         }
-        return null;
+        return parts;
     }
 
     /**

@@ -107,7 +107,8 @@ public class ParticleVisitor {
         try {
             List<SchemaProperty> properties = new ArrayList<>();
             collectTypeContent(complexType, schema, true, properties, new LinkedHashSet<>());
-            return new SchemaType(name, properties, Documentation.of(complexType), open);
+            return new SchemaType(name, SchemaTrees.qualifyCollidingNames(properties), Documentation.of(complexType),
+                    open);
         } finally {
             repeatingParticles = outerRepeating;
             open = outerOpen;
@@ -237,8 +238,10 @@ public class ParticleVisitor {
         boolean required = parentRequired && attribute.getUse() == XmlSchemaUse.REQUIRED;
         String documentation = firstText(Documentation.of(attribute), Documentation.of(resolved));
         QName wireName = attribute.isRef() ? resolved.getQName() : attribute.getWireName();
+        String fixed = firstText(attribute.getFixedValue(), resolved.getFixedValue());
+        String defaultValue = firstText(attribute.getDefaultValue(), resolved.getDefaultValue());
         addProperty(properties, simpleProperty(name, type, required, documentation, SchemaProperty.Kind.ATTRIBUTE,
-                namespace(wireName)));
+                namespace(wireName)).withDefault(fixed != null ? fixed : defaultValue, fixed != null));
     }
 
     private static SchemaProperty simpleProperty(String name, SimpleTypeInfo type, boolean required,
@@ -304,7 +307,7 @@ public class ParticleVisitor {
             }
         }
         if (particle instanceof XmlSchemaChoice choice) {
-            // A repeating choice is one JAXB list of mixed items: no "one of" constraint fits it.
+            // Each occurrence of a repeating choice is one alternative: no "one of" constraint fits the arrays.
             boolean repeating = choice.getMaxOccurs() > 1;
             boolean optional = !required || choice.getItems().stream().anyMatch(ParticleVisitor::emptyable);
             String group = "#choice" + properties.size();
@@ -312,11 +315,9 @@ public class ParticleVisitor {
             for (XmlSchemaChoiceMember item : choice.getItems()) {
                 int start = properties.size();
                 collectMember(item, schema, false, properties, visitingBases);
-                if (!repeating) {
-                    SchemaProperty.Choice member = new SchemaProperty.Choice(group, alternative, optional);
-                    for (int index = start; index < properties.size(); index++) {
-                        properties.set(index, properties.get(index).withOuterChoice(member));
-                    }
+                SchemaProperty.Choice member = new SchemaProperty.Choice(group, alternative, optional || repeating, repeating);
+                for (int index = start; index < properties.size(); index++) {
+                    properties.set(index, properties.get(index).withOuterChoice(member));
                 }
                 alternative++;
             }
@@ -435,9 +436,12 @@ public class ParticleVisitor {
 
         SimpleTypeInfo type = SimpleTypeResolver.resolve(
                 resolvedElement.getSchemaTypeName(), resolvedElement.getSchemaType(), schema);
+        String fixed = firstText(element.getFixedValue(), resolvedElement.getFixedValue());
+        String defaultValue = firstText(element.getDefaultValue(), resolvedElement.getDefaultValue());
         properties.add(new SchemaProperty(name, type.xsdType(), type.facets(), null, null, required,
                 collection || type.list(), nillable, minItems, maxItems, documentation, List.of(),
-                SchemaProperty.Kind.ELEMENT, namespace, type.list(), null));
+                SchemaProperty.Kind.ELEMENT, namespace, type.list(), null)
+                .withDefault(fixed != null ? fixed : defaultValue, fixed != null));
     }
 
     private static String firstText(String... candidates) {

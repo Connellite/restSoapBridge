@@ -140,21 +140,65 @@ public class OpenApiExampleFactory {
     private static Object typedValue(String jsonType, String lexical) {
         try {
             return switch (jsonType) {
-                case "integer" -> {
-                    BigInteger integer = new BigDecimal(lexical.trim()).toBigIntegerExact();
-                    yield integer.bitLength() < Integer.SIZE ? (Object) integer.intValue() : (Object) integer.longValue();
-                }
+                case "integer" -> integerLiteral(new BigDecimal(lexical.trim()).toBigIntegerExact().toString());
                 case "number" -> new BigDecimal(lexical.trim());
-                case "boolean" -> switch (lexical.trim()) {
-                    case "true", "1" -> Boolean.TRUE;
-                    case "false", "0" -> Boolean.FALSE;
-                    default -> null;
-                };
+                case "boolean" -> xsdBoolean(lexical.trim());
                 default -> lexical;
             };
         } catch (ArithmeticException | NumberFormatException exception) {
             return null;
         }
+    }
+
+    /**
+     * An XSD literal as the Java type the schema's own type calls for, or {@code null} when it is not a value of that
+     * type at all - which is how a malformed literal costs the annotation or the constraint it appears in rather than
+     * the whole conversion. The typed Schema classes cast a literal along their own rules: a boolean one reads every
+     * literal that is not {@code "true"} - including the legal XSD spelling {@code 1} - as {@code false}.
+     * <p>
+     * Adapted from Membrane API Gateway (Apache License 2.0):
+     * <a href="https://github.com/membrane/api-gateway/blob/2a3f9f13809774041cba4e34c3d1efd06b977c20/core/src/main/java/com/predic8/membrane/core/interceptor/wsdl2openapi/XsdToSchema.java#L483-L494">XsdToSchema.typedLiteral</a>.
+     */
+    static Object typedLiteral(Schema<?> schema, String literal) {
+        try {
+            if (schema instanceof BooleanSchema) {
+                return xsdBoolean(literal);
+            }
+            if (schema instanceof IntegerSchema) {
+                return integerLiteral(literal);
+            }
+            if (schema instanceof NumberSchema) {
+                return new BigDecimal(literal);
+            }
+            return literal;
+        } catch (NumberFormatException exception) {
+            return null;
+        }
+    }
+
+    /**
+     * The four XSD spellings of a boolean; anything else is not one.
+     * <p>
+     * Adapted from Membrane API Gateway (Apache License 2.0):
+     * <a href="https://github.com/membrane/api-gateway/blob/2a3f9f13809774041cba4e34c3d1efd06b977c20/core/src/main/java/com/predic8/membrane/core/interceptor/wsdl2openapi/XsdToSchema.java#L497-L503">XsdToSchema.xsdBoolean</a>.
+     */
+    static Boolean xsdBoolean(String literal) {
+        return switch (literal) {
+            case "true", "1" -> Boolean.TRUE;
+            case "false", "0" -> Boolean.FALSE;
+            default -> null;
+        };
+    }
+
+    /**
+     * An integer literal as an int where one fits - xsd:integer is unbounded, so BigInteger otherwise.
+     * <p>
+     * Adapted from Membrane API Gateway (Apache License 2.0):
+     * <a href="https://github.com/membrane/api-gateway/blob/2a3f9f13809774041cba4e34c3d1efd06b977c20/core/src/main/java/com/predic8/membrane/core/interceptor/wsdl2openapi/XsdToSchema.java#L506-L509">XsdToSchema.integerLiteral</a>.
+     */
+    static Object integerLiteral(String literal) {
+        BigInteger value = new BigInteger(literal);
+        return value.bitLength() < Integer.SIZE ? value.intValue() : value;
     }
 
     private static Object sampleValue(String xsdType) {
@@ -287,6 +331,9 @@ public class OpenApiExampleFactory {
      * The JSON type of an XSD built-in type, with the {@code format} that holds its value range. Where the pair does
      * not name the XSD type (unbounded integers, {@code decimal}, {@code time}, {@code token}, the {@code g*} dates,
      * ...), {@code x-xsd-type} carries it. {@code decimal} has no {@code double} format: its values are exact.
+     * <p>
+     * The {@code uri} and {@code duration} formats follow Membrane API Gateway (Apache License 2.0):
+     * <a href="https://github.com/membrane/api-gateway/blob/2a3f9f13809774041cba4e34c3d1efd06b977c20/core/src/main/java/com/predic8/membrane/core/interceptor/wsdl2openapi/XsdToSchema.java#L978-L1006">XsdToSchema.mapPrimitive</a>.
      */
     static Schema<?> scalarSchema(String xsdType) {
         String type = normalizeXsdType(xsdType);
@@ -302,6 +349,8 @@ public class OpenApiExampleFactory {
             case "date" -> new StringSchema().format("date");
             case "datetime" -> new StringSchema().format("date-time");
             case "time" -> new StringSchema().format("time");
+            case "anyuri" -> new StringSchema().format("uri");
+            case "duration" -> new StringSchema().format("duration");
             // Jackson reads and writes byte[] as base64, whatever the XSD lexical form (hexBinary).
             case "base64binary", "hexbinary" -> new StringSchema().format("byte");
             case "object" -> new ObjectSchema();

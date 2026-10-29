@@ -174,7 +174,7 @@ public class SoapInvoker {
         if (contract.outputSimple()) {
             SchemaProperty value = contract.outputType().properties().get(0);
             ObjectNode json = JsonNodeFactory.instance.objectNode();
-            json.set(SchemaTrees.restName(value.name()), reader.value(element, value));
+            json.set(value.jsonKey(), reader.value(element, value));
             return json;
         }
         return reader.object(element, contract.outputType());

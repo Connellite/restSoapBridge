@@ -23,7 +23,6 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -109,13 +108,12 @@ class TypeTreeSchemaTest {
     void typesOfOneLocalNameInDifferentNamespacesGetQualifiedNames() throws Exception {
         OpenAPI openApi = openApi(mappings("Dual", DUAL_WSDL));
 
-        assertNull(openApi.getComponents().getSchemas().get("Item"));
-        assertTrue(openApi.getComponents().getSchemas().containsKey("Dual_Item"));
-        assertTrue(openApi.getComponents().getSchemas().containsKey("Dual_Item_2"));
+        // The first namespace keeps the bare name, the other one is prefixed with its last segment.
         Schema<?> first = openApi.getComponents().getSchemas().get("Dual_getARequest");
         Schema<?> second = openApi.getComponents().getSchemas().get("Dual_getBRequest");
-        assertEquals("#/components/schemas/Dual_Item", ((Schema<?>) first.getProperties().get("item")).get$ref());
-        assertEquals("#/components/schemas/Dual_Item_2", ((Schema<?>) second.getProperties().get("item")).get$ref());
+        assertEquals("#/components/schemas/Item", ((Schema<?>) first.getProperties().get("item")).get$ref());
+        assertEquals("#/components/schemas/b_Item", ((Schema<?>) second.getProperties().get("item")).get$ref());
+        assertTrue(openApi.getComponents().getSchemas().get("b_Item").getProperties().containsKey("size"));
     }
 
     private List<MappingDefinition> mappings(String service, String wsdl) throws Exception {

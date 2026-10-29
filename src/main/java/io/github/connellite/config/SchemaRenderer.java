@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import static io.github.connellite.config.OpenApiExampleFactory.scalarSchema;
 import static io.github.connellite.config.OpenApiExampleFactory.withFacets;
@@ -27,7 +28,7 @@ import static io.github.connellite.config.OpenApiExampleFactory.withFacets;
 public final class SchemaRenderer {
 
     static final String COMPONENTS = "#/components/schemas/";
-    private static final Pattern INVALID_COMPONENT_KEY_CHARS = Pattern.compile("[^a-zA-Z0-9._-]");
+    private static final Pattern INVALID_COMPONENT_KEY_CHARS = Pattern.compile("[^a-zA-Z0-9._-]+");
 
     private final Map<String, SchemaType> types;
     private final Function<String, String> componentNames;
@@ -57,9 +58,17 @@ public final class SchemaRenderer {
         }));
     }
 
-    /** OpenAPI component keys must match {@code ^[a-zA-Z0-9.\-_]+$}, otherwise code generators reject the spec. */
+    /**
+     * A name usable in a {@code #/components/schemas/...} reference: everything outside {@code [A-Za-z0-9._-]} becomes
+     * an underscore. An XSD name is an NCName and may contain characters - Unicode letters above all - that a
+     * reference cannot carry.
+     * <p>
+     * Adapted from Membrane API Gateway (Apache License 2.0):
+     * <a href="https://github.com/membrane/api-gateway/blob/2a3f9f13809774041cba4e34c3d1efd06b977c20/core/src/main/java/com/predic8/membrane/core/interceptor/wsdl2openapi/XsdDomUtil.java#L303-L306">XsdDomUtil.sanitizeComponentName</a>.
+     */
     static String componentKey(String raw) {
-        return INVALID_COMPONENT_KEY_CHARS.matcher(raw).replaceAll("_");
+        String sanitized = INVALID_COMPONENT_KEY_CHARS.matcher(raw).replaceAll("_").replaceAll("^_+|_+$", "");
+        return sanitized.isEmpty() ? "type" : sanitized;
     }
 
     static String localName(String qname) {
@@ -84,8 +93,9 @@ public final class SchemaRenderer {
         List<String> required = new ArrayList<>();
         Map<String, Map<Integer, Set<String>>> choices = new LinkedHashMap<>();
         Map<String, Boolean> optionalChoices = new LinkedHashMap<>();
+        Set<String> repeatingChoices = new LinkedHashSet<>();
         for (SchemaProperty property : type.properties()) {
-            String name = SchemaTrees.restName(property.name());
+            String name = property.jsonKey();
             schema.addProperty(name, property(property));
             if (property.required()) {
                 required.add(name);
@@ -95,6 +105,9 @@ public final class SchemaRenderer {
                         .computeIfAbsent(choice.alternative(), key -> new LinkedHashSet<>())
                         .add(name);
                 optionalChoices.merge(choice.group(), choice.optional(), Boolean::logicalOr);
+                if (choice.repeating()) {
+                    repeatingChoices.add(choice.group());
+                }
             }
         }
         if (!required.isEmpty()) {
@@ -104,8 +117,41 @@ public final class SchemaRenderer {
             // xs:any / xs:anyAttribute: content the schema does not name is carried as it is.
             schema.setAdditionalProperties(Boolean.TRUE);
         }
-        addChoiceConstraints(schema, choices, optionalChoices);
+        Map<String, Map<Integer, Set<String>>> enforceable = new LinkedHashMap<>(choices);
+        repeatingChoices.forEach(group -> {
+            describeChoice(schema, "Repeatable choice: each occurrence is one of", choices.get(group));
+            enforceable.remove(group);
+        });
+        addChoiceConstraints(schema, enforceable, optionalChoices);
         return schema;
+    }
+
+    /**
+     * Names the alternatives of a choice whose constraint no keyword of the schema can carry. Several such choices of
+     * one object each add a paragraph.
+     * <p>
+     * Adapted from Membrane API Gateway (Apache License 2.0):
+     * <a href="https://github.com/membrane/api-gateway/blob/2a3f9f13809774041cba4e34c3d1efd06b977c20/core/src/main/java/com/predic8/membrane/core/interceptor/wsdl2openapi/XsdToSchema.java#L717-L725">XsdToSchema.describeChoice</a>.
+     */
+    private static void describeChoice(ObjectSchema schema, String lead, Map<Integer, Set<String>> alternatives) {
+        String names = alternatives.values().stream()
+                .filter(members -> !members.isEmpty())
+                .map(members -> String.join(" + ", members))
+                .collect(Collectors.joining(", "));
+        if (names.isEmpty()) {
+            return;
+        }
+        String note = "%s: %s. Not enforced by this schema.".formatted(lead, names);
+        schema.setDescription(schema.getDescription() == null ? note : schema.getDescription() + "\n\n" + note);
+    }
+
+    /** The type's documentation ahead of what the schema already says about it (a choice note). */
+    static void document(Schema<?> schema, String documentation) {
+        if (documentation != null) {
+            schema.setDescription(schema.getDescription() == null
+                    ? documentation
+                    : documentation + "\n\n" + schema.getDescription());
+        }
     }
 
     private Schema<?> reference(String typeName) {
@@ -115,9 +161,7 @@ public final class SchemaRenderer {
             components.put(name, new ObjectSchema());
             SchemaType type = types.get(typeName);
             ObjectSchema schema = object(type);
-            if (type.documentation() != null) {
-                schema.setDescription(type.documentation());
-            }
+            document(schema, type.documentation());
             components.put(name, schema);
         }
         return new Schema<>().$ref(COMPONENTS + name);
@@ -135,6 +179,7 @@ public final class SchemaRenderer {
             }
         } else {
             value = withFacets(scalarSchema(property.isComplex() ? "object" : property.xsdType()), property.facets());
+            applyDefaultValue(property, value);
         }
         if (property.nillable()) {
             value = nullable(value);
@@ -150,6 +195,33 @@ public final class SchemaRenderer {
             array.setDescription(documentation);
         }
         return array;
+    }
+
+    /**
+     * Copies an {@code xs:default} - or an {@code xs:fixed}, the value the declaration pins the field to - onto the
+     * schema, as a value of the field's own type: a numeric default is emitted unquoted, and one that is no value of
+     * that type is left out rather than emitted as invalid. A {@code fixed} value also becomes a single-value
+     * {@code enum}: unlike a default it is a constraint. Neither fills in a field a request leaves out: the SOAP
+     * service applies its own defaults.
+     * <p>
+     * Adapted from Membrane API Gateway (Apache License 2.0):
+     * <a href="https://github.com/membrane/api-gateway/blob/2a3f9f13809774041cba4e34c3d1efd06b977c20/core/src/main/java/com/predic8/membrane/core/interceptor/wsdl2openapi/XsdToSchema.java#L458-L472">XsdToSchema.applyDefaultValue</a>.
+     */
+    @SuppressWarnings("unchecked")
+    static void applyDefaultValue(SchemaProperty property, Schema<?> schema) {
+        String literal = property.defaultValue();
+        if (literal == null || literal.isEmpty()) {
+            return;
+        }
+        Object value = OpenApiExampleFactory.typedLiteral(schema, literal);
+        if (value == null) {
+            return;
+        }
+        Schema<Object> target = (Schema<Object>) schema;
+        target.setDefault(value);
+        if (property.fixed()) {
+            target.setEnum(new ArrayList<>(List.of(value)));
+        }
     }
 
     /** OpenAPI 3.0 ignores keywords next to {@code $ref}: those go on an {@code allOf} wrapper. */

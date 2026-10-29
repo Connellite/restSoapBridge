@@ -93,6 +93,7 @@ logging:
 | `path-prefix` | REST path prefix | `/api` |
 | `http-method` | HTTP method for all generated endpoints | `POST` |
 | `fail-on-unavailable` | `true`: do not start if `services-url` or any `wsdl-*-url` is unavailable; `false`: log a warning and skip that source | `true` |
+| `path-style` | `as-is`: `/api/UserService/getUserInfo`; `kebab-case`: `/api/user-service/get-user-info` | `as-is` |
 
 `path-prefix` must not be `/`: generated endpoints would shadow Swagger UI and actuator.
 
@@ -269,9 +270,11 @@ an absent response field is `null`.
 
 Swagger, validation and the JSON ↔ XML conversion follow the same XSD shape. A named `xs:complexType` is published once, as a
 component under its XSD name (`#/components/schemas/Customer`), and every use refers to it by `$ref`; a type that
-contains itself refers to its own component, and validation follows it to any depth. Two different types of one
-name (other namespaces, other services) get the service name in front (`Orders_Item`), plus a number when that is
-not enough. Anonymous types stay in place.
+contains itself refers to its own component, and validation follows it to any depth. When different types share a
+local name, the first by namespace keeps it and the others get the last meaningful segment of their namespace in
+front (`urn:example:billing:v1` → `billing_Item`), or the service name when one namespace has different types in
+two WSDLs; a number follows when that is still not enough. The names do not depend on the order of the services.
+Anonymous types stay in place.
 
 | XSD | JSON |
 |-----|------|
@@ -282,15 +285,18 @@ not enough. Anonymous types stay in place.
 | `xs:list` | array of the item type |
 | `xs:group ref` | the group's elements inline |
 | `xs:choice` | all alternatives as optional fields, plus `oneOf` (required choice) or `not` two of them (optional choice) |
-| repeating `xs:choice` / `xs:sequence` / `xs:group` (`maxOccurs > 1`) | each of its elements an array, without the `oneOf`; JSON keeps the values per element, not their interleaving |
+| repeating `xs:choice` / `xs:sequence` / `xs:group` (`maxOccurs > 1`) | each of its elements an array, without the `oneOf` (a repeating choice is named in the `description` instead); JSON keeps the values per element, not their interleaving |
+| elements of one local name from different namespaces in one type | keys prefixed with the last segment of the namespace: `billing:item`, `shipping:item` |
+| `default` / `fixed` | OpenAPI `default`, typed like the field (`1` of an `xs:boolean` is `true`); `fixed` also a single-value `enum`. Missing fields are not filled in |
 | `xs:any`, `xs:anyAttribute` | `additionalProperties: true`: undeclared elements and attributes are carried as they are, under their local names (elements as objects or text, repeated ones as arrays) |
 | body element of a simple type (BARE `String echo(String)`) | one field named after the element: `{"echo": "hi"}`, response `{"echoResponse": "hi!"}` |
 | `nillable="true"` | `nullable: true` |
 | `minOccurs`/`maxOccurs` of a repeating element | `minItems`/`maxItems` |
-| `xs:documentation`, `wsdl:documentation` | `description` of the property, the operation and the declared fault |
+| `xs:documentation`, `wsdl:documentation` | `description` of the type, the property, the operation and the declared fault; the lines of a paragraph are joined, several `documentation` elements become paragraphs |
+| RPC/literal part (`<part name="id" type="xs:long"/>`) | a property named after the part; the bridge builds the operation wrapper (RPC/encoded and document/literal with several body parts are not supported) |
 
 Scalars get the JSON type and the `format` that holds their range (`int32`, `int64`, `float`, `double`, `date`,
-`date-time`, `time`, `byte`). Where that pair does not name the XSD type, `x-xsd-type` does: `xs:decimal` is a
+`date-time`, `time`, `uri`, `duration`, `byte`). Where that pair does not name the XSD type, `x-xsd-type` does: `xs:decimal` is a
 `number` without `double` format (its values are exact), unbounded integers (`xs:integer`, `xs:unsignedLong`, ...)
 are an `integer` without format, `xs:time`, `xs:token`, the `g*` date types and the like are strings.
 

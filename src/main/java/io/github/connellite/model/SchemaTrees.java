@@ -3,6 +3,7 @@ package io.github.connellite.model;
 import lombok.experimental.UtilityClass;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -34,7 +35,7 @@ public class SchemaTrees {
                                 Map<String, SchemaType> types, Set<String> enclosing, List<SchemaField> fields) {
         for (SchemaProperty property : properties) {
             int start = fields.size();
-            String path = prefix + property.name();
+            String path = prefix + (property.jsonName() != null ? property.jsonName() : property.name());
             boolean required = parentRequired && property.required();
             SchemaType type = property.typeName() != null ? types.get(property.typeName()) : property.inlineType();
             String documentation = property.documentation() != null || type == null
@@ -69,6 +70,9 @@ public class SchemaTrees {
                 SchemaField field = fields.get(index);
                 for (int choice = choices.size() - 1; choice >= 0; choice--) {
                     SchemaProperty.Choice local = choices.get(choice);
+                    if (local.repeating()) {
+                        continue;
+                    }
                     field = field.withChoice(new SchemaField.ChoiceRef(prefix + local.group(), local.alternative(),
                             depth(prefix), local.optional() || !parentRequired));
                 }
@@ -99,6 +103,62 @@ public class SchemaTrees {
             start++;
         }
         return segment.substring(start);
+    }
+
+    /**
+     * A short name for a namespace, used to distinguish types that share a local name: the last meaningful segment of
+     * the URI, e.g. {@code http://example.com/billing} or {@code urn:example:billing:v1} both yield {@code billing}. A
+     * bare version segment is skipped, because a namespace that ends in one names the version rather than the domain.
+     * <p>
+     * Adapted from Membrane API Gateway (Apache License 2.0):
+     * <a href="https://github.com/membrane/api-gateway/blob/2a3f9f13809774041cba4e34c3d1efd06b977c20/core/src/main/java/com/predic8/membrane/core/interceptor/wsdl2openapi/XsdDomUtil.java#L314-L322">XsdDomUtil.nsPrefix</a>.
+     */
+    public static String nsPrefix(String namespace) {
+        String withoutScheme = namespace.replaceFirst("^[A-Za-z][A-Za-z0-9+.-]*:(//)?", "");
+        String path = withoutScheme.split("[?#]")[0];
+        List<String> segments = Arrays.stream(path.split("[/:]")).filter(segment -> !segment.isEmpty()).toList();
+        for (int index = segments.size() - 1; index >= 0; index--) {
+            if (!segments.get(index).matches("v\\d+")) {
+                return segments.get(index);
+            }
+        }
+        return path;
+    }
+
+    /**
+     * JSON names for elements of one local name from different namespaces in one object, which would otherwise be
+     * one property: each is prefixed with a name derived from its namespace ({@code billing:item},
+     * {@code shipping:item}); an unqualified one keeps its plain name. Membrane uses Clark notation
+     * ({@code {urn:billing}item}) here; a namespace URI holds dots, which field paths split at.
+     * <p>
+     * Adapted from Membrane API Gateway (Apache License 2.0):
+     * <a href="https://github.com/membrane/api-gateway/blob/2a3f9f13809774041cba4e34c3d1efd06b977c20/core/src/main/java/com/predic8/membrane/core/interceptor/wsdl2openapi/XsdToSchema.java#L728-L735">XsdToSchema.collidingLocalNames</a>,
+     * <a href="https://github.com/membrane/api-gateway/blob/2a3f9f13809774041cba4e34c3d1efd06b977c20/core/src/main/java/com/predic8/membrane/core/interceptor/wsdl2openapi/XsdDomUtil.java#L230-L232">XsdDomUtil.qualifiedKey</a>.
+     */
+    public static List<SchemaProperty> qualifyCollidingNames(List<SchemaProperty> properties) {
+        Map<String, Set<String>> namespaces = new LinkedHashMap<>();
+        for (SchemaProperty property : properties) {
+            if (property.kind() == SchemaProperty.Kind.ELEMENT && property.namespace() != null) {
+                namespaces.computeIfAbsent(property.name(), ignored -> new LinkedHashSet<>()).add(property.namespace());
+            }
+        }
+        List<SchemaProperty> qualified = new ArrayList<>();
+        Set<String> keys = new LinkedHashSet<>();
+        for (SchemaProperty property : properties) {
+            Set<String> colliding = namespaces.get(property.name());
+            if (colliding == null || colliding.size() < 2 || property.kind() != SchemaProperty.Kind.ELEMENT
+                    || property.namespace().isEmpty()) {
+                qualified.add(property);
+                continue;
+            }
+            String base = nsPrefix(property.namespace()).replace('.', '_') + ":" + property.name();
+            String key = base;
+            for (int index = 2; !keys.add(key); index++) {
+                key = base + "_" + index;
+            }
+            qualified.add(property.withJsonName(key));
+        }
+        return qualified;
     }
 
     /** Number of path segments of a field prefix ({@code a.b[].} → 2). */

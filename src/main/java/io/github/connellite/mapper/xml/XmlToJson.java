@@ -20,6 +20,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 import static io.github.connellite.service.auto.xsd.ParticleVisitor.MAP_TYPE;
@@ -47,7 +48,7 @@ public final class XmlToJson {
             return json;
         }
         for (SchemaProperty property : type.properties()) {
-            String name = SchemaTrees.restName(property.name());
+            String name = property.jsonKey();
             switch (property.kind()) {
                 case ATTRIBUTE -> {
                     Attr attribute = attribute(element, property);
@@ -63,6 +64,11 @@ public final class XmlToJson {
                 }
                 case ELEMENT -> {
                     List<Element> children = children(element, property.name());
+                    if (property.jsonName() != null) {
+                        // One of several elements of this local name: told apart by namespace.
+                        children.removeIf(child -> !Objects.equals(property.namespace(),
+                                child.getNamespaceURI() != null ? child.getNamespaceURI() : ""));
+                    }
                     if (children.isEmpty()) {
                         continue;
                     }
