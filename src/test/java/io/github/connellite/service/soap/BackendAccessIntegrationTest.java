@@ -1,15 +1,15 @@
 package io.github.connellite.service.soap;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.github.connellite.config.BridgeProperties;
 import io.github.connellite.config.WsdlUrlCollector;
 import io.github.connellite.exception.SoapDiscoveryException;
-import io.github.connellite.mapper.path.SoapArgument;
-import io.github.connellite.mapper.path.SoapJsonMapper;
 import io.github.connellite.model.DiscoveredSoapService;
 import io.github.connellite.model.MappingDefinition;
+import io.github.connellite.model.WsdlOperationModel;
 import io.github.connellite.service.auto.WsdlAuthenticator;
 import io.github.connellite.service.auto.WsdlParser;
 import io.github.connellite.service.auto.WsdlServiceDiscovery;
@@ -97,13 +97,18 @@ class BackendAccessIntegrationTest {
         assertEquals(1, services.size());
         assertEquals("Hello", services.get(0).name());
         assertEquals(proxy + "/services/Hello?wsdl", services.get(0).wsdlUrl());
+        WsdlOperationModel hello = services.get(0).operations().stream()
+                .filter(operation -> operation.name().equals("hello"))
+                .findFirst()
+                .orElseThrow();
         MappingDefinition.SoapTarget target = new MappingDefinition.SoapTarget();
         target.setWsdl(services.get(0).wsdlUrl());
         target.setOperation("hello");
-        Object result = backend.invoker(properties)
-                .invoke(target, List.of(new SoapArgument("name", "Ann")), List.of(), Map.of());
-        JsonNode json = SoapJsonMapper.instance().valueToTree(result);
-        assertEquals("Hello, Ann", json.isTextual() ? json.asText() : json.path("return").asText(), json.toString());
+        target.setEndpoint(hello.endpoint());
+        target.setContract(hello.contract());
+        JsonNode json = backend.invoker(properties)
+                .invoke(target, new ObjectMapper().createObjectNode().put("name", "Ann"), Map.of());
+        assertEquals("Hello, Ann", json.path("return").asText(), json.toString());
         assertEquals(1, requestsTo(proxy), "the call went through endpoint-base-url");
     }
 
@@ -128,9 +133,9 @@ class BackendAccessIntegrationTest {
         MappingDefinition.SoapTarget target = backend.mapping("hello").getSoap();
         target.setEndpointAddress(proxy + "/services/Hello");
         try {
-            Object result = backend.invoker(properties)
-                    .invoke(target, List.of(new SoapArgument("name", "Bob")), List.of(), Map.of());
-            assertEquals("Hello, Bob", String.valueOf(result));
+            JsonNode result = backend.invoker(properties)
+                    .invoke(target, new ObjectMapper().createObjectNode().put("name", "Bob"), Map.of());
+            assertEquals("Hello, Bob", result.path("return").asText(), result.toString());
             assertEquals(1, requestsTo(proxy), "the call went through the configured address");
         } finally {
             target.setEndpointAddress(null);

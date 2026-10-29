@@ -252,7 +252,7 @@ already part of the default log pattern) and sent to the SOAP backend.
 
 ### SOAP client pool: `bridge.client-pool.*`
 
-Dynamic CXF clients (one per WSDL) are cached with Caffeine. Metrics are published as `cache.*{cache="soap.clients"}`.
+SOAP clients (a CXF `Dispatch` per WSDL port) are cached with Caffeine. Metrics are published as `cache.*{cache="soap.clients"}`.
 
 | Property | Description | Default |
 |----------|-------------|---------|
@@ -262,10 +262,12 @@ Dynamic CXF clients (one per WSDL) are cached with Caffeine. Metrics are publish
 
 ### JSON field names
 
-JSON fields use XSD names, not Java names: JAXB annotations are honoured, so `return`, `class` or `item-id`
-appear in JSON as in the WSDL. XSD dates are written in their lexical form (`2024-01-02T03:04:05+03:00`).
+JSON fields use XSD names, so `return`, `class` or `item-id` appear in JSON as in the WSDL. Numbers and booleans
+are JSON numbers and booleans, XSD dates and other values their lexical string (`2024-01-02T03:04:05+03:00`),
+`xs:base64Binary` and `xs:hexBinary` base64 strings. A JAXB map (`entry`/`key`/`value`) is a plain JSON object;
+an absent response field is `null`.
 
-Swagger and validation follow the XSD shape JAXB binds to. A named `xs:complexType` is published once, as a
+Swagger, validation and the JSON ↔ XML conversion follow the same XSD shape. A named `xs:complexType` is published once, as a
 component under its XSD name (`#/components/schemas/Customer`), and every use refers to it by `$ref`; a type that
 contains itself refers to its own component, and validation follows it to any depth. Two different types of one
 name (other namespaces, other services) get the service name in front (`Orders_Item`), plus a number when that is
@@ -515,13 +517,13 @@ Errors are RFC 7807 problems (`application/problem+json`) with a `correlationId`
 | 401 | SOAP fault `AccessDeniedException` (see `bridge.errors.fault-status`) |
 | 404 | Endpoint not generated (operation missing in WSDL or different `path-prefix`) |
 | 500 | Bug in the bridge itself (e.g. `NullPointerException`); details only in the server log under the same `correlationId` |
-| 502 | SOAP fault from the backend (`faultName`, `faultCode`, `faultSubcodes`, `faultInfo`), backend HTTP error, unreadable response, or response that does not match the generated mapping |
+| 502 | SOAP fault from the backend (`faultName`, `faultCode`, `faultSubcodes`, `faultInfo`), backend HTTP error, unreadable response, or (with `bridge.validation.response=strict`) a response that does not match the WSDL schema |
 | 503 | Backend not reachable (connection refused, unknown host, WSDL cannot be loaded) or backend answered 503; also no mappings loaded |
 | 504 | Backend did not answer within `bridge.auto.receive-timeout` |
 
-`faultName` is the declared WSDL fault (`AccessDeniedException` for class `AccessDeniedException_Exception`) or `SoapFault`
-for undeclared ones. `faultCode` is only known for undeclared faults: CXF rebuilds declared ones from the fault bean
-(`faultInfo`). Map fault names to statuses:
+`faultName` is the declared WSDL fault, recognised by the element in the fault `detail` and named after its
+`wsdl:message` (`AccessDeniedException`), or `SoapFault` for undeclared ones. `faultInfo` is that detail element as
+JSON. `faultCode` and `faultSubcodes` come from the SOAP fault itself. Map fault names to statuses:
 
 ```yaml
 bridge:

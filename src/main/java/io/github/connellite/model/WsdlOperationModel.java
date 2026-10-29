@@ -11,6 +11,7 @@ import java.util.Map;
  * @param inputType     type of the request body element, or {@code null} when it has no fields
  * @param outputType    type of the response body element, or {@code null} when it has no fields
  * @param types         named types of the WSDL by QName, which the types above refer to
+ * @param contract      what calling the operation needs, {@code null} for a model built without a WSDL
  */
 public record WsdlOperationModel(
         String name,
@@ -26,7 +27,8 @@ public record WsdlOperationModel(
         WsdlEndpoint endpoint,
         SchemaType inputType,
         SchemaType outputType,
-        Map<String, SchemaType> types
+        Map<String, SchemaType> types,
+        SoapOperationContract contract
 ) {
 
     public WsdlOperationModel {
@@ -40,7 +42,7 @@ public record WsdlOperationModel(
                               List<SchemaField> inputSchemaFields, String outputElement, List<String> outputFields,
                               List<SchemaField> outputSchemaFields, List<SoapHeaderModel> inputHeaders) {
         this(name, inputElement, inputFields, inputSchemaFields, outputElement, outputFields, outputSchemaFields,
-                inputHeaders, List.of(), null, null, null, null, null);
+                inputHeaders, List.of(), null, null, null, null, null, null);
     }
 
     public WsdlOperationModel(String name, String inputElement, List<String> inputFields,

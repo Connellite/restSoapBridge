@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.connellite.config.OpenApiExampleFactory;
 import io.github.connellite.exception.RequestValidationException;
-import io.github.connellite.mapper.path.SoapArgument;
 import io.swagger.v3.oas.models.media.ObjectSchema;
 import io.swagger.v3.oas.models.media.Schema;
 #if SPRING_BOOT_3
@@ -126,8 +125,9 @@ class SoapHeadersIntegrationTest {
     void unknownHeaderIsRejected() {
         RequestValidationException exception = assertThrows(RequestValidationException.class,
                 () -> explicit.invoker(SoapTestBackend.properties()).invoke(explicit.mapping("echo").getSoap(),
-                        List.of(new SoapArgument("text", "hi")),
-                        List.of(new SoapArgument("session", Map.of("id", "1"))),
+                        MAPPER.readTree("""
+                                {"text": "hi", "soapHeaders": {"session": {"id": "1"}}}
+                                """),
                         Map.of()));
 
         assertTrue(exception.getErrors().get(0).startsWith("Unknown SOAP header(s) [session]"), exception.getErrors().toString());

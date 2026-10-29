@@ -8,7 +8,6 @@ import io.github.connellite.config.OpenApiExampleFactory;
 import io.github.connellite.config.WsdlUrlCollector;
 import io.github.connellite.exception.RequestValidationException;
 import io.github.connellite.exception.UpstreamException;
-import io.github.connellite.mapper.path.SoapArgument;
 import io.github.connellite.model.DiscoveredSoapService;
 import io.github.connellite.model.MappingDefinition;
 import io.github.connellite.service.auto.AutoMappingGenerator;
@@ -115,15 +114,12 @@ class SoapBindingIntegrationTest {
     }
 
     @Test
-    void invokerBindsShuffledArgumentsByName() {
-        Object result = invoker(properties()).invoke(wsdlUrl, "createDocument", List.of(
-                new SoapArgument("token", "t-2"),
-                new SoapArgument("pages", "7"),
-                new SoapArgument("folderUuid", "f-7"),
-                new SoapArgument("name", "Scan")
-        ));
+    void invokerBindsShuffledArgumentsByName() throws Exception {
+        JsonNode result = invoker(properties()).invoke(mapping("createDocument").getSoap(), MAPPER.readTree("""
+                {"token": "t-2", "pages": "7", "folderUuid": "f-7", "name": "Scan"}
+                """), Map.of());
 
-        JsonNode document = io.github.connellite.mapper.path.SoapJsonMapper.instance().valueToTree(result);
+        JsonNode document = result.get("return");
         assertEquals("f-7", document.get("folderUuid").asText());
         assertEquals("t-2", document.get("owner").asText());
         assertEquals(7, document.get("pages").asInt());
@@ -132,10 +128,9 @@ class SoapBindingIntegrationTest {
     @Test
     void unknownArgumentIsRejectedWithExpectedNames() {
         RequestValidationException exception = assertThrows(RequestValidationException.class,
-                () -> invoker(properties()).invoke(wsdlUrl, "createDocument", List.of(
-                        new SoapArgument("folderUuid", "f-1"),
-                        new SoapArgument("folderId", "typo")
-                )));
+                () -> invoker(properties()).invoke(mapping("createDocument").getSoap(), MAPPER.readTree("""
+                        {"folderUuid": "f-1", "folderId": "typo"}
+                        """), Map.of()));
 
         assertEquals(List.of("Unknown parameter(s) [folderId] for SOAP operation 'createDocument'; "
                 + "expected [folderUuid, token, name, pages]"), exception.getErrors());
@@ -258,49 +253,6 @@ class SoapBindingIntegrationTest {
 
         assertEquals("doc-9", response.get("document").get("uuid").asText());
         assertEquals("Found", response.get("document").get("name").asText());
-    }
-
-    // --- response mapping failures -----------------------------------------------------------------------------
-
-    @Test
-    void responseWithDataButOnlyNullMappedFieldsIsAnError() {
-        MappingDefinition mapping = copy(mapping("createDocument"));
-        mapping.setResponse(Map.of("#root.folder.uuid", "$.folder.uuid"));
-
-        UpstreamException exception = assertThrows(UpstreamException.class,
-                () -> execute(properties(), mapping, """
-                        {"folderUuid": "f-1", "token": "t", "name": "n", "pages": 1}
-                        """));
-
-        assertTrue(exception.getMessage().contains("does not match response mapping [#root.folder.uuid]"),
-                exception.getMessage());
-        assertTrue(exception.getMessage().contains("\"uuid\":\"doc-1\""), exception.getMessage());
-    }
-
-    @Test
-    void propertyMissingOnNonNullObjectIsNotSilentlyNull() {
-        MappingDefinition mapping = copy(mapping("createDocument"));
-        mapping.setResponse(Map.of("#root.uuid", "$.uuid", "#root.noSuchField", "$.x"));
-
-        UpstreamException exception = assertThrows(UpstreamException.class,
-                () -> execute(properties(), mapping, """
-                        {"folderUuid": "f-1", "token": "t", "name": "n", "pages": 1}
-                        """));
-
-        assertTrue(exception.getMessage().contains("noSuchField"), exception.getMessage());
-    }
-
-    @Test
-    void nullNestedObjectStillGivesNullLeaf() throws Exception {
-        MappingDefinition mapping = copy(mapping("createDocument"));
-        mapping.setResponse(new LinkedHashMap<>(Map.of("#root.uuid", "$.uuid", "#root.folder.uuid", "$.folderUuid")));
-
-        ObjectNode response = execute(properties(), mapping, """
-                {"folderUuid": "f-1", "token": "t", "name": "n", "pages": 1}
-                """);
-
-        assertEquals("doc-1", response.get("uuid").asText());
-        assertTrue(response.get("folderUuid").isNull());
     }
 
     // --- helpers -----------------------------------------------------------------------------------------------

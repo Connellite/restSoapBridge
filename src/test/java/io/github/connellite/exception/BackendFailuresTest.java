@@ -1,9 +1,13 @@
 package io.github.connellite.exception;
 
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.apache.cxf.binding.soap.SoapFault;
+import org.apache.cxf.helpers.DOMUtils;
 import org.apache.cxf.interceptor.Fault;
 import org.apache.cxf.transport.http.HTTPException;
 import org.junit.jupiter.api.Test;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
 
 import javax.xml.namespace.QName;
 import javax.xml.stream.XMLStreamException;
@@ -114,29 +118,32 @@ class BackendFailuresTest {
     }
 
     @Test
-    void declaredFaultUsesConfiguredStatusAndFaultInfo() {
-        SoapFaultException exception = soapFault(new AccessDeniedException_Exception("Token expired", new FaultBean(17)));
+    void declaredFaultIsRecognisedByItsDetailElement() {
+        SoapFaultException exception = declared(fault("Token expired", "AccessDenied"));
 
         assertEquals("AccessDeniedException", exception.getFaultName());
         assertEquals(401, exception.getHttpStatus());
         assertEquals("Token expired", exception.getMessage());
+        assertEquals("{http://schemas.xmlsoap.org/soap/envelope/}Server", exception.getFaultCode());
         assertEquals(17, exception.getFaultInfo().get("code").asInt());
     }
 
     @Test
-    void declaredFaultTakesPrecedenceOverItsSoapFaultCause() {
-        AccessDeniedException_Exception declared = new AccessDeniedException_Exception("Denied", new FaultBean(1));
-        declared.initCause(new SoapFault("Denied", SERVER));
+    void detailOfAnotherElementIsAnUndeclaredFault() {
+        SoapFaultException exception = declared(fault("db down", "Unexpected"));
 
-        SoapFaultException exception = soapFault(declared);
-
-        assertEquals("AccessDeniedException", exception.getFaultName());
-        assertEquals("{http://schemas.xmlsoap.org/soap/envelope/}Server", exception.getFaultCode());
+        assertEquals("SoapFault", exception.getFaultName());
+        assertEquals(502, exception.getHttpStatus());
+        assertNull(exception.getFaultInfo());
     }
 
     @Test
     void unlistedDeclaredFaultIsBadGateway() {
-        assertEquals(502, soapFault(new RepositoryException_Exception("db down", null)).getHttpStatus());
+        SoapFaultException exception = assertInstanceOf(SoapFaultException.class, BackendFailures.classify(
+                fault("db down", "AccessDenied"), FAULT_STATUS,
+                detail -> new BackendFailures.DeclaredFault("RepositoryException", null)));
+
+        assertEquals(502, exception.getHttpStatus());
     }
 
     @Test
@@ -159,44 +166,26 @@ class BackendFailuresTest {
         return assertInstanceOf(SoapFaultException.class, BackendFailures.classify(failure, FAULT_STATUS));
     }
 
-    /** Shape of a dynamic client fault class: {@code <Fault>_Exception} with {@code getFaultInfo()}. */
-    @SuppressWarnings("checkstyle:TypeName")
-    static class AccessDeniedException_Exception extends Exception {
-        private final FaultBean faultInfo;
-
-        AccessDeniedException_Exception(String message, FaultBean faultInfo) {
-            super(message);
-            this.faultInfo = faultInfo;
-        }
-
-        public FaultBean getFaultInfo() {
-            return faultInfo;
-        }
+    /** A SOAP fault whose detail holds {@code <urn:test:element><code>17</code></urn:test:element>}. */
+    private static SoapFault fault(String message, String element) {
+        SoapFault fault = new SoapFault(message, SERVER);
+        Document document = DOMUtils.createDocument();
+        Element detail = document.createElement("detail");
+        Element entry = document.createElementNS("urn:test", "t:" + element);
+        Element code = document.createElement("code");
+        code.setTextContent("17");
+        entry.appendChild(code);
+        detail.appendChild(entry);
+        fault.setDetail(detail);
+        return fault;
     }
 
-    @SuppressWarnings("checkstyle:TypeName")
-    static class RepositoryException_Exception extends Exception {
-        private final FaultBean faultInfo;
-
-        RepositoryException_Exception(String message, FaultBean faultInfo) {
-            super(message);
-            this.faultInfo = faultInfo;
-        }
-
-        public FaultBean getFaultInfo() {
-            return faultInfo;
-        }
-    }
-
-    public static class FaultBean {
-        private final int code;
-
-        FaultBean(int code) {
-            this.code = code;
-        }
-
-        public int getCode() {
-            return code;
-        }
+    /** Classification knowing one declared fault: the {@code AccessDenied} detail element. */
+    private static SoapFaultException declared(Throwable failure) {
+        return assertInstanceOf(SoapFaultException.class, BackendFailures.classify(failure, FAULT_STATUS,
+                detail -> "AccessDenied".equals(detail.getLocalName())
+                        ? new BackendFailures.DeclaredFault("AccessDeniedException", JsonNodeFactory.instance
+                        .objectNode().put("code", Integer.parseInt(detail.getTextContent())))
+                        : null));
     }
 }

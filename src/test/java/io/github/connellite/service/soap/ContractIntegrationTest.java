@@ -6,7 +6,8 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.connellite.config.BridgeOpenApiBuilder;
 import io.github.connellite.exception.RequestValidationException;
-import io.github.connellite.mapper.path.SoapArgument;
+import io.github.connellite.mapper.xml.JsonToXml;
+import io.github.connellite.model.SoapOperationContract;
 import io.github.connellite.model.MappingRegistry;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.media.Schema;
@@ -23,8 +24,11 @@ import javax.jws.WebService;
 import javax.xml.bind.annotation.adapters.XmlAdapter;
 import javax.xml.bind.annotation.adapters.XmlJavaTypeAdapter;
 #endif
-import org.apache.cxf.endpoint.Client;
-import org.apache.cxf.service.model.BindingOperationInfo;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+
+import javax.xml.namespace.QName;
+import java.util.Set;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -130,28 +134,25 @@ class ContractIntegrationTest {
     }
 
     /**
-     * Binding without a SOAP call. The WSDL types folderUuid as xs:string (UUID adapter on the server), so the
-     * dynamic client part is String, not UUID; the server turns it back into a UUID.
+     * The request element without a SOAP call: elements in XSD order whatever the JSON order, a JAXB map as
+     * entry/key/value elements, an empty entry list as no element at all.
      */
     @Test
-    void convertArguments_bindsByPartName() {
-        Client client = backend.pool(SoapTestBackend.properties()).getClient(backend.wsdlUrl());
-        BindingOperationInfo operation = SoapInvoker.findOperation(client, "createDocument");
+    void requestPayload_followsXsdOrder() throws Exception {
+        SoapOperationContract contract = backend.mapping("createDocument").getSoap().getContract();
+        JsonToXml writer = new JsonToXml(contract.types());
 
-        Object[] params = SoapInvoker.convertArguments(operation, operation.getUnwrappedOperation(), List.of(
-                new SoapArgument("files", List.of(Map.of("key", "p", "value", "n"))),
-                new SoapArgument("token", "t"),
-                new SoapArgument("folderUuid", FOLDER_UUID),
-                new SoapArgument("attributeValues", List.of())
-        ));
+        Element payload = writer.object(QName.valueOf(contract.inputElement()), contract.inputType(), MAPPER.readTree("""
+                {"files": [{"key": "p", "value": "n"}], "token": "t", "folderUuid": "%s", "attributeValues": []}
+                """.formatted(FOLDER_UUID)), "$", Set.of(), "createDocument");
 
-        assertEquals(4, params.length);
-        assertEquals("t", params[0]);
-        assertEquals(FOLDER_UUID, params[1]);
-        assertEquals(List.of(), params[2]);
-        List<?> files = assertInstanceOf(List.class, params[3]);
-        assertEquals(1, files.size());
-        assertEquals("MapEntryStringString", files.get(0).getClass().getSimpleName());
+        assertEquals(List.of(), writer.errors());
+        List<String> children = new ArrayList<>();
+        for (Node node = payload.getFirstChild(); node != null; node = node.getNextSibling()) {
+            children.add(node.getLocalName());
+        }
+        assertEquals(List.of("token", "folderUuid", "files"), children);
+        assertEquals("p", payload.getElementsByTagNameNS("*", "key").item(0).getTextContent());
     }
 
     // 3. Complex DTO response -----------------------------------------------------------------------------------

@@ -8,7 +8,7 @@ import lombok.experimental.UtilityClass;
 @UtilityClass
 public class JsonPathWriter {
 
-    private static final ObjectMapper OBJECT_MAPPER = SoapJsonMapper.instance();
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     public static void write(ObjectNode body, String jsonPath, Object value) {
         String relative = toRelativePath(jsonPath);

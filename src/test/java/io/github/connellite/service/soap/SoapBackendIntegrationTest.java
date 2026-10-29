@@ -3,7 +3,10 @@ package io.github.connellite.service.soap;
 import io.github.connellite.config.BridgeProperties;
 import io.github.connellite.correlation.CorrelationId;
 import io.github.connellite.exception.SoapFaultException;
-import io.github.connellite.mapper.path.SoapArgument;
+import io.github.connellite.model.MappingDefinition;
+import io.github.connellite.model.WsdlOperationModel;
+import io.github.connellite.service.auto.WsdlParser;
+import com.fasterxml.jackson.databind.ObjectMapper;
 #if SPRING_BOOT_3
 import jakarta.jws.WebMethod;
 import jakarta.jws.WebParam;
@@ -105,8 +108,8 @@ class SoapBackendIntegrationTest {
         SoapInvoker invoker = invoker(properties);
         MDC.put(CorrelationId.MDC_KEY, "it-123");
 
-        Object result = invoker.invoke(wsdlUrl, "greet", List.of(new SoapArgument("name", "Bob")),
-                Map.of("Accept-Language", List.of("ru")));
+        Object result = invoker.invoke(greet(), new ObjectMapper().createObjectNode().put("name", "Bob"),
+                Map.of("Accept-Language", List.of("ru"))).path("return").asText();
 
         assertEquals("Hello, Bob", result);
         assertEquals(WSS_USER, RECEIVED.get("wssUser"));
@@ -122,9 +125,22 @@ class SoapBackendIntegrationTest {
         SoapInvoker invoker = invoker(backendProperties("wrong"));
 
         SoapFaultException fault = assertThrows(SoapFaultException.class,
-                () -> invoker.invoke(wsdlUrl, "greet", List.of(new SoapArgument("name", "Bob"))));
+                () -> invoker.invoke(greet(), new ObjectMapper().createObjectNode().put("name", "Bob"), Map.of()));
 
         assertEquals("SoapFault", fault.getFaultName());
+    }
+
+    private static MappingDefinition.SoapTarget greet() {
+        WsdlOperationModel greet = new WsdlParser().parseOperations(wsdlUrl).stream()
+                .filter(operation -> operation.name().equals("greet"))
+                .findFirst()
+                .orElseThrow();
+        MappingDefinition.SoapTarget target = new MappingDefinition.SoapTarget();
+        target.setWsdl(wsdlUrl);
+        target.setOperation("greet");
+        target.setEndpoint(greet.endpoint());
+        target.setContract(greet.contract());
+        return target;
     }
 
     private static BridgeProperties backendProperties(String wssPassword) {

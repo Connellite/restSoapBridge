@@ -1,6 +1,7 @@
 package io.github.connellite.service.auto;
 
 import io.github.connellite.model.SoapFaultModel;
+import io.github.connellite.model.SoapOperationContract;
 import io.github.connellite.model.WsdlEndpoint;
 import io.github.connellite.model.WsdlOperationModel;
 import io.github.connellite.model.SchemaField;
@@ -134,9 +135,20 @@ public class WsdlParser {
                                 ? List.of(simpleElements.get(header.element()))
                                 : List.of();
                         inputHeaders.add(new SoapHeaderModel(header.part(), header.element().getLocalPart(), fields,
-                                headerProperty(header, index)));
+                                headerProperty(header, index), header.element().toString()));
                     }
 
+                    List<SoapFaultModel> faults = faults(operation, index);
+                    SoapOperationContract contract = new SoapOperationContract(
+                            new QName(portType.getQName().getNamespaceURI(), operationName).toString(),
+                            inputElement != null ? inputElement.toString() : null,
+                            outputElement != null ? outputElement.toString() : null,
+                            operation.getOutput() == null,
+                            index.elementTypes().get(inputElement),
+                            index.elementTypes().get(outputElement),
+                            inputHeaders,
+                            faults,
+                            index.types());
                     result.add(new WsdlOperationModel(
                             operationName,
                             inputElement != null ? inputElement.getLocalPart() : operationName,
@@ -146,12 +158,13 @@ public class WsdlParser {
                             paths(outputFields),
                             outputFields,
                             inputHeaders,
-                            faults(operation, index),
+                            faults,
                             Documentation.of(operation.getDocumentationElement()),
                             endpoint,
                             index.elementTypes().get(inputElement),
                             index.elementTypes().get(outputElement),
-                            index.types()
+                            index.types(),
+                            contract
                     ));
                 }
             }
@@ -315,7 +328,8 @@ public class WsdlParser {
                     : List.of();
             faults.add(new SoapFaultModel(javaClassName(message.getQName().getLocalPart()), fields,
                     Documentation.of(fault.getDocumentationElement()),
-                    part != null ? index.elementTypes().get(part.getElementName()) : null));
+                    part != null ? index.elementTypes().get(part.getElementName()) : null,
+                    part != null ? part.getElementName().toString() : null));
         }
         faults.sort(Comparator.comparing(SoapFaultModel::name));
         return faults;

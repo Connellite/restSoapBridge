@@ -121,6 +121,7 @@ public class AutoMappingGenerator {
         soap.setWsdl(service.wsdlUrl());
         soap.setEndpointAddress(bridgeProperties.getBackend().endpointAddress(service.name()));
         soap.setEndpoint(operation.endpoint());
+        soap.setContract(operation.contract());
         mapping.setSoap(soap);
         mapping.setFaults(operation.faults());
         mapping.setDocumentation(operation.documentation());

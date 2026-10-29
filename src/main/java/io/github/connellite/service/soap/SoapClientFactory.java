@@ -6,9 +6,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.cxf.configuration.security.AuthorizationPolicy;
 import org.apache.cxf.endpoint.Client;
-import org.apache.cxf.jaxb.JAXBDataBinding;
-import org.apache.cxf.message.Message;
-import org.apache.cxf.jaxws.endpoint.dynamic.JaxWsDynamicClientFactory;
+import org.apache.cxf.jaxws.DispatchImpl;
 import org.apache.cxf.service.model.EndpointInfo;
 import org.apache.cxf.transport.http.HTTPConduit;
 import org.apache.cxf.transports.http.configuration.HTTPClientPolicy;
@@ -20,20 +18,27 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
 #if SPRING_BOOT_3
-import jakarta.xml.bind.ValidationEventHandler;
+import jakarta.xml.ws.BindingProvider;
+import jakarta.xml.ws.Dispatch;
+import jakarta.xml.ws.Service;
 #else
-import javax.xml.bind.ValidationEventHandler;
+import javax.xml.ws.BindingProvider;
+import javax.xml.ws.Dispatch;
+import javax.xml.ws.Service;
 #endif
 import javax.security.auth.callback.Callback;
 import javax.security.auth.callback.CallbackHandler;
 import javax.xml.namespace.QName;
+import javax.xml.transform.Source;
+import java.net.MalformedURLException;
 import java.net.URI;
+import java.net.URL;
 import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Builds dynamic CXF clients configured for the backend: endpoint address, timeouts, HTTP Basic auth and
- * WS-Security UsernameToken.
+ * Builds the CXF {@code Dispatch} of a WSDL port, configured for the backend: endpoint address, timeouts, HTTP Basic
+ * auth and WS-Security UsernameToken. Nothing is generated or compiled: requests and responses stay XML.
  */
 @Slf4j
 @Component
@@ -43,31 +48,35 @@ public class SoapClientFactory {
 
     private final BridgeProperties bridgeProperties;
 
-    public Client create(String wsdlUrl) {
-        return create(wsdlUrl, null);
-    }
-
     /**
+     * @param endpoint        WSDL service and port the operations were read from
      * @param endpointAddress SOAP endpoint address of this service ({@code bridge.backend.endpoint-addresses});
      *                        {@code null}: the WSDL {@code soap:address}, rebased on {@code endpoint-base-url}
      */
-    public Client create(String wsdlUrl, String endpointAddress) {
-        return create(wsdlUrl, null, endpointAddress);
+    public SoapPort create(String wsdlUrl, WsdlEndpoint endpoint, String endpointAddress) {
+        if (endpoint == null) {
+            throw new IllegalStateException("WSDL " + wsdlUrl + " declares no SOAP port to call");
+        }
+        log.info("Creating SOAP dispatch for WSDL {} port {}", wsdlUrl, endpoint.port());
+        Service service = Service.create(url(wsdlUrl), QName.valueOf(endpoint.service()));
+        Dispatch<Source> dispatch = service.createDispatch(portName(endpoint), Source.class, Service.Mode.PAYLOAD);
+        Client client = ((DispatchImpl<?>) dispatch).getClient();
+        // Before configure(): the conduit takes its target address from the endpoint when it is created.
+        String address = overrideAddress(client, endpointAddress);
+        // JAX-WS puts the WSDL address into the request context, where it wins over the endpoint's.
+        dispatch.getRequestContext().put(BindingProvider.ENDPOINT_ADDRESS_PROPERTY, address);
+        // Calls share the dispatch: each thread gets its own copy of the request context above.
+        client.setThreadLocalRequestContext(true);
+        configure(client);
+        return new SoapPort(dispatch, client);
     }
 
-    /**
-     * @param endpoint WSDL service and port the operations were read from; {@code null}: the one CXF picks
-     */
-    public Client create(String wsdlUrl, WsdlEndpoint endpoint, String endpointAddress) {
-        log.info("Creating dynamic SOAP client for WSDL: {}{}", wsdlUrl, endpoint != null ? " port " + endpoint.port() : "");
-        Client client = endpoint == null
-                ? JaxWsDynamicClientFactory.newInstance().createClient(wsdlUrl)
-                : JaxWsDynamicClientFactory.newInstance().createClient(wsdlUrl, QName.valueOf(endpoint.service()),
-                portName(endpoint));
-        // Before configure(): the conduit takes its target address from the endpoint when it is created.
-        overrideAddress(client, endpointAddress);
-        configure(client);
-        return client;
+    private static URL url(String wsdlUrl) {
+        try {
+            return new URL(wsdlUrl);
+        } catch (MalformedURLException exception) {
+            throw new IllegalArgumentException("Not a WSDL URL: " + wsdlUrl, exception);
+        }
     }
 
     /** CXF names an endpoint by the port name in the namespace of its service. */
@@ -75,7 +84,8 @@ public class SoapClientFactory {
         return new QName(QName.valueOf(endpoint.service()).getNamespaceURI(), endpoint.port());
     }
 
-    private void overrideAddress(Client client, String endpointAddress) {
+    /** The address calls go to: configured, rebased, or the WSDL one. */
+    private String overrideAddress(Client client, String endpointAddress) {
         EndpointInfo endpoint = client.getEndpoint().getEndpointInfo();
         String wsdlAddress = endpoint.getAddress();
         String address = endpointAddress != null
@@ -84,7 +94,9 @@ public class SoapClientFactory {
         if (address != null && !address.equals(wsdlAddress)) {
             endpoint.setAddress(address);
             log.info("SOAP endpoint {} instead of WSDL address {}", address, wsdlAddress);
+            return address;
         }
+        return wsdlAddress;
     }
 
     /** Scheme, host and port of {@code baseUrl} with the path and query of {@code address}. */
@@ -115,27 +127,6 @@ public class SoapClientFactory {
             configureBasicAuth(conduit);
         }
         configureWsSecurity(client);
-        configureResponseValidation(client);
-    }
-
-    /**
-     * {@code bridge.validation.response}: CXF validates what the client reads (response and fault details) against
-     * the WSDL schemas while unmarshalling. In {@code log} mode a handler reports each violation and lets it pass.
-     */
-    private void configureResponseValidation(Client client) {
-        BridgeProperties.ResponseValidation mode = bridgeProperties.getValidation().getResponse();
-        if (mode == null || mode == BridgeProperties.ResponseValidation.OFF) {
-            return;
-        }
-        client.getEndpoint().put(Message.SCHEMA_VALIDATION_ENABLED, "IN");
-        if (mode == BridgeProperties.ResponseValidation.LOG) {
-            String endpoint = client.getEndpoint().getEndpointInfo().getName().getLocalPart();
-            ValidationEventHandler logOnly = event -> {
-                log.warn("SOAP response of {} does not match the WSDL schema: {}", endpoint, event.getMessage());
-                return true;
-            };
-            client.getEndpoint().put(JAXBDataBinding.READER_VALIDATION_EVENT_HANDLER, logOnly);
-        }
     }
 
     private void configureTimeouts(HTTPConduit conduit) {

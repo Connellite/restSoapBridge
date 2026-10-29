@@ -281,7 +281,7 @@ public class RequestSchemaValidator {
     }
 
     /**
-     * JAXB maps and {@code List<entry>} accept both key/value shapes (see JaxbMaps): a map may come as
+     * JAXB maps and {@code List<entry>} accept both key/value shapes (see JsonToXml): a map may come as
      * {@code [{key, value}]}, an entry list as {@code {"name": "value"}}.
      */
     private static void allowKeyValueAlternative(ObjectNode schema) {

@@ -13,6 +13,11 @@ import java.util.List;
  * @param maxItems      {@code maxOccurs} of a repeating element, {@code null} for {@code unbounded}
  * @param documentation {@code xs:documentation} of the element or attribute, or {@code null}
  * @param choices       the {@code xs:choice}s of the holding object this property is an alternative of, outermost first
+ * @param kind          how the property appears in XML
+ * @param namespace     namespace of the element or attribute name on the wire ({@code ""} when unqualified),
+ *                      {@code null} when unknown (a tree built from field paths)
+ * @param list          an {@code xs:list}: one element or attribute holding space-separated values
+ * @param mapNamespace  namespace of the {@code entry}/{@code key}/{@code value} elements of a JAXB map
  */
 public record SchemaProperty(
         String name,
@@ -26,12 +31,31 @@ public record SchemaProperty(
         Integer minItems,
         Integer maxItems,
         String documentation,
-        List<Choice> choices
+        List<Choice> choices,
+        Kind kind,
+        String namespace,
+        boolean list,
+        String mapNamespace
 ) {
 
     public SchemaProperty {
         facets = facets == null ? SchemaFacets.NONE : facets;
         choices = choices == null ? List.of() : List.copyOf(choices);
+        kind = kind == null ? Kind.ELEMENT : kind;
+    }
+
+    public SchemaProperty(String name, String xsdType, SchemaFacets facets, String typeName, SchemaType inlineType,
+                          boolean required, boolean array, boolean nillable, Integer minItems, Integer maxItems,
+                          String documentation, List<Choice> choices) {
+        this(name, xsdType, facets, typeName, inlineType, required, array, nillable, minItems, maxItems,
+                documentation, choices, Kind.ELEMENT, null, false, null);
+    }
+
+    public enum Kind {
+        ELEMENT,
+        ATTRIBUTE,
+        /** The text of a simple-content type (JAXB {@code @XmlValue}). */
+        VALUE
     }
 
     public boolean isComplex() {
@@ -40,12 +64,12 @@ public record SchemaProperty(
 
     public SchemaProperty withName(String newName) {
         return new SchemaProperty(newName, xsdType, facets, typeName, inlineType, required, array, nillable, minItems,
-                maxItems, documentation, choices);
+                maxItems, documentation, choices, kind, namespace, list, mapNamespace);
     }
 
     public SchemaProperty withRequired(boolean newRequired) {
         return new SchemaProperty(name, xsdType, facets, typeName, inlineType, newRequired, array, nillable, minItems,
-                maxItems, documentation, choices);
+                maxItems, documentation, choices, kind, namespace, list, mapNamespace);
     }
 
     /** This property as an alternative of one more, enclosing choice. */
@@ -54,7 +78,7 @@ public record SchemaProperty(
         all.add(choice);
         all.addAll(choices);
         return new SchemaProperty(name, xsdType, facets, typeName, inlineType, required, array, nillable, minItems,
-                maxItems, documentation, all);
+                maxItems, documentation, all, kind, namespace, list, mapNamespace);
     }
 
     /**

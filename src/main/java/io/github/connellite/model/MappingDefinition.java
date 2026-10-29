@@ -59,5 +59,7 @@ public class MappingDefinition {
         private String endpointAddress;
         /** WSDL service and port to call; {@code null}: the one CXF picks (a WSDL without SOAP ports). */
         private WsdlEndpoint endpoint;
+        /** What the call needs to build the request and read the response; {@code null}: not callable. */
+        private SoapOperationContract contract;
     }
 }

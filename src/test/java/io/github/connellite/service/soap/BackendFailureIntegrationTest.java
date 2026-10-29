@@ -5,12 +5,14 @@ import io.github.connellite.config.BridgeProperties;
 import io.github.connellite.model.MappingDefinition;
 import io.github.connellite.model.MappingRegistry;
 import io.github.connellite.model.SoapFaultModel;
+import io.github.connellite.model.SoapOperationContract;
+import io.github.connellite.model.WsdlEndpoint;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.media.Schema;
 import io.swagger.v3.oas.models.responses.ApiResponse;
 import io.github.connellite.exception.SoapFaultException;
 import io.github.connellite.exception.UpstreamException;
-import io.github.connellite.mapper.path.SoapArgument;
 #if SPRING_BOOT_3
 import jakarta.jws.WebMethod;
 import jakarta.jws.WebParam;
@@ -42,12 +44,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class BackendFailureIntegrationTest {
 
+    private static final ObjectMapper JSON = new ObjectMapper();
+
     @Test
     void unreachableWsdlIsServiceUnavailable() throws Exception {
         String wsdlUrl = "http://localhost:" + freePort() + "/services/Missing?wsdl";
 
         UpstreamException exception = assertThrows(UpstreamException.class,
-                () -> new SoapTestBackendInvoker().invoker().invoke(wsdlUrl, "ping", List.of()));
+                () -> new SoapTestBackendInvoker().invoker().invoke(unreachable(wsdlUrl), JSON.createObjectNode(),
+                        Map.of()));
 
         assertEquals(503, exception.getHttpStatus());
         assertTrue(exception.getMessage().startsWith("Cannot load WSDL " + wsdlUrl), exception.getMessage());
@@ -57,19 +62,20 @@ class BackendFailureIntegrationTest {
     void endpointRemovedThenPortClosedAfterClientCreation() throws Exception {
         SoapTestBackend backend = SoapTestBackend.start("Failures", FailureServiceImpl.class, new FailureServiceImpl());
         SoapInvoker invoker = backend.invoker(SoapTestBackend.properties());
-        assertEquals("pong", invoker.invoke(backend.wsdlUrl(), "ping", List.of()));
+        MappingDefinition.SoapTarget ping = backend.mapping("ping").getSoap();
+        assertEquals("pong", invoker.invoke(ping, JSON.createObjectNode(), Map.of()).path("return").asText());
 
         // Endpoint gone, HTTP server still up: the backend answers 404 -> bad gateway.
         backend.close();
         UpstreamException notFound = assertThrows(UpstreamException.class,
-                () -> invoker.invoke(backend.wsdlUrl(), "ping", List.of()));
+                () -> invoker.invoke(ping, JSON.createObjectNode(), Map.of()));
         assertEquals(502, notFound.getHttpStatus(), notFound.getMessage());
         assertTrue(notFound.getMessage().startsWith("SOAP backend answered HTTP 404"), notFound.getMessage());
 
         // Nothing listens on the port any more: connection refused -> service unavailable.
         JettyHTTPServerEngineFactory.destroyForPort(new URL(backend.wsdlUrl()).getPort());
         UpstreamException refused = assertThrows(UpstreamException.class,
-                () -> invoker.invoke(backend.wsdlUrl(), "ping", List.of()));
+                () -> invoker.invoke(ping, JSON.createObjectNode(), Map.of()));
         assertEquals(503, refused.getHttpStatus(), refused.getMessage());
     }
 
@@ -80,8 +86,8 @@ class BackendFailureIntegrationTest {
             properties.getAuto().setReceiveTimeout(Duration.ofMillis(300));
 
             UpstreamException exception = assertThrows(UpstreamException.class,
-                    () -> backend.invoker(properties).invoke(backend.wsdlUrl(), "slow",
-                            List.of(new SoapArgument("millis", 2000))));
+                    () -> backend.invoker(properties).invoke(backend.mapping("slow").getSoap(),
+                            JSON.createObjectNode().put("millis", 2000), Map.of()));
 
             assertEquals(504, exception.getHttpStatus());
         }
@@ -94,15 +100,15 @@ class BackendFailureIntegrationTest {
             properties.getErrors().setFaultStatus(Map.of("ConflictException", 409));
 
             SoapFaultException fault = assertThrows(SoapFaultException.class,
-                    () -> backend.invoker(properties).invoke(backend.wsdlUrl(), "create",
-                            List.of(new SoapArgument("name", "dup"))));
+                    () -> backend.invoker(properties).invoke(backend.mapping("create").getSoap(),
+                            JSON.createObjectNode().put("name", "dup"), Map.of()));
 
             assertEquals("ConflictException", fault.getFaultName());
             assertEquals(409, fault.getHttpStatus());
             assertEquals("Already exists: dup", fault.getMessage());
             assertEquals(42, fault.getFaultInfo().get("code").asInt(), fault.getFaultInfo().toString());
-            // CXF builds the declared exception from the fault bean and drops the SoapFault: no fault code.
-            assertNull(fault.getFaultCode());
+            // The fault is read from the SOAP fault itself: its code is known for declared faults too.
+            assertEquals("{http://schemas.xmlsoap.org/soap/envelope/}Server", fault.getFaultCode());
         }
     }
 
@@ -129,8 +135,8 @@ class BackendFailureIntegrationTest {
                     conflict.getContent().get("application/problem+json").getSchema().get$ref());
 
             SoapFaultException fault = assertThrows(SoapFaultException.class,
-                    () -> backend.invoker(properties).invoke(backend.wsdlUrl(), "create",
-                            List.of(new SoapArgument("name", "dup"))));
+                    () -> backend.invoker(properties).invoke(create.getSoap(),
+                            JSON.createObjectNode().put("name", "dup"), Map.of()));
             assertEquals(problem.getProperties().get("faultName").getEnum().get(0), fault.getFaultName());
         }
     }
@@ -139,7 +145,8 @@ class BackendFailureIntegrationTest {
     void undeclaredServerExceptionIsSoapFaultBadGateway() throws Exception {
         try (SoapTestBackend backend = SoapTestBackend.start("Failures", FailureServiceImpl.class, new FailureServiceImpl())) {
             SoapFaultException fault = assertThrows(SoapFaultException.class,
-                    () -> backend.invoker(SoapTestBackend.properties()).invoke(backend.wsdlUrl(), "crash", List.of()));
+                    () -> backend.invoker(SoapTestBackend.properties()).invoke(backend.mapping("crash").getSoap(),
+                            JSON.createObjectNode(), Map.of()));
 
             assertEquals("SoapFault", fault.getFaultName());
             assertEquals(502, fault.getHttpStatus());
@@ -151,11 +158,23 @@ class BackendFailureIntegrationTest {
     void wrongArgumentTypeStaysClientErrorNotBackendError() throws Exception {
         try (SoapTestBackend backend = SoapTestBackend.start("Failures", FailureServiceImpl.class, new FailureServiceImpl())) {
             RuntimeException exception = assertThrows(RuntimeException.class,
-                    () -> backend.invoker(SoapTestBackend.properties()).invoke(backend.wsdlUrl(), "slow",
-                            List.of(new SoapArgument("millis", Map.of("not", "a number")))));
+                    () -> backend.invoker(SoapTestBackend.properties()).invoke(backend.mapping("slow").getSoap(),
+                            JSON.createObjectNode().set("millis", JSON.createObjectNode().put("not", "a number")),
+                            Map.of()));
 
             assertInstanceOf(io.github.connellite.exception.RequestValidationException.class, exception);
         }
+    }
+
+    /** A target whose WSDL cannot be loaded. */
+    private static MappingDefinition.SoapTarget unreachable(String wsdlUrl) {
+        MappingDefinition.SoapTarget target = new MappingDefinition.SoapTarget();
+        target.setWsdl(wsdlUrl);
+        target.setOperation("ping");
+        target.setEndpoint(new WsdlEndpoint("{urn:missing}MissingService", "MissingPort"));
+        target.setContract(new SoapOperationContract("{urn:missing}ping", "{urn:missing}ping", null, false, null, null,
+                List.of(), List.of(), Map.of()));
+        return target;
     }
 
     private static int freePort() throws Exception {

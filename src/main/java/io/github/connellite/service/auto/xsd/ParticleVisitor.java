@@ -173,7 +173,8 @@ public class ParticleVisitor {
             return;
         }
         SimpleTypeInfo value = SimpleTypeResolver.resolve(baseTypeName, null, schema);
-        addProperty(properties, simpleProperty(SIMPLE_CONTENT_VALUE, value, required, null));
+        addProperty(properties, simpleProperty(SIMPLE_CONTENT_VALUE, value, required, null,
+                SchemaProperty.Kind.VALUE, null));
     }
 
     private void collectAttributes(
@@ -216,13 +217,19 @@ public class ParticleVisitor {
         SimpleTypeInfo type = SimpleTypeResolver.resolve(resolved.getSchemaTypeName(), resolved.getSchemaType(), schema);
         boolean required = parentRequired && attribute.getUse() == XmlSchemaUse.REQUIRED;
         String documentation = firstText(Documentation.of(attribute), Documentation.of(resolved));
-        addProperty(properties, simpleProperty(name, type, required, documentation));
+        QName wireName = attribute.isRef() ? resolved.getQName() : attribute.getWireName();
+        addProperty(properties, simpleProperty(name, type, required, documentation, SchemaProperty.Kind.ATTRIBUTE,
+                namespace(wireName)));
     }
 
     private static SchemaProperty simpleProperty(String name, SimpleTypeInfo type, boolean required,
-                                                 String documentation) {
+                                                 String documentation, SchemaProperty.Kind kind, String namespace) {
         return new SchemaProperty(name, type.xsdType(), type.facets(), null, null, required, type.list(), false,
-                null, null, documentation, List.of());
+                null, null, documentation, List.of(), kind, namespace, type.list(), null);
+    }
+
+    private static String namespace(QName wireName) {
+        return wireName != null && wireName.getNamespaceURI() != null ? wireName.getNamespaceURI() : "";
     }
 
     /** An attribute restated by a derived type, or one named like an element, is listed once. */
@@ -343,19 +350,25 @@ public class ParticleVisitor {
         Integer minItems = collection && element.getMinOccurs() > 0 ? (int) element.getMinOccurs() : null;
         Integer maxItems = collection && element.getMaxOccurs() < Integer.MAX_VALUE ? (int) element.getMaxOccurs() : null;
         String documentation = firstText(Documentation.of(element), Documentation.of(resolvedElement));
+        // A reference names a global element; a local one is qualified as its form says.
+        String namespace = namespace(element.isRef() ? resolvedElement.getQName() : element.getWireName());
         XmlSchemaComplexType complexType = ComplexTypeResolver.resolve(resolvedElement, schema);
 
         if (complexType != null) {
-            // JAXB Map<K,V> in XSD is sequence of repeating entry{key,value}.
-            // Java beans expose a real Map (no getEntry()), so expand entry[] into SpEL would 502.
-            if (!collection && isJaxbMapComplexType(complexType, schema)) {
+            // JAXB Map<K,V> in XSD is sequence of repeating entry{key,value}: a JSON object of its own.
+            XmlSchemaElement entry = collection ? null : jaxbMapEntry(complexType, schema);
+            if (entry != null) {
                 properties.add(new SchemaProperty(name, MAP_TYPE, null, null, null, required, false, nillable,
-                        null, null, firstText(documentation, Documentation.of(complexType)), List.of()));
+                        null, null, firstText(documentation, Documentation.of(complexType)), List.of(),
+                        SchemaProperty.Kind.ELEMENT, namespace, false, namespace(entry.isRef()
+                        ? ComplexTypeResolver.resolveElementReference(entry).getQName()
+                        : entry.getWireName())));
                 return;
             }
             if (complexType.getQName() != null) {
                 properties.add(new SchemaProperty(name, "object", null, reference(complexType, schema), null,
-                        required, collection, nillable, minItems, maxItems, documentation, List.of()));
+                        required, collection, nillable, minItems, maxItems, documentation, List.of(),
+                        SchemaProperty.Kind.ELEMENT, namespace, false, null));
                 return;
             }
             // An anonymous type can only contain itself through an element reference; stop there.
@@ -369,14 +382,16 @@ public class ParticleVisitor {
             }
             properties.add(new SchemaProperty(name, "object", null, null, inline, required, collection, nillable,
                     minItems, maxItems, inline != null ? documentation
-                    : firstText(documentation, Documentation.of(complexType)), List.of()));
+                    : firstText(documentation, Documentation.of(complexType)), List.of(),
+                    SchemaProperty.Kind.ELEMENT, namespace, false, null));
             return;
         }
 
         SimpleTypeInfo type = SimpleTypeResolver.resolve(
                 resolvedElement.getSchemaTypeName(), resolvedElement.getSchemaType(), schema);
         properties.add(new SchemaProperty(name, type.xsdType(), type.facets(), null, null, required,
-                collection || type.list(), nillable, minItems, maxItems, documentation, List.of()));
+                collection || type.list(), nillable, minItems, maxItems, documentation, List.of(),
+                SchemaProperty.Kind.ELEMENT, namespace, type.list(), null));
     }
 
     private static String firstText(String... candidates) {
@@ -393,32 +408,32 @@ public class ParticleVisitor {
     }
 
     /**
-     * Detects the JAXB/CXF representation of {@code Map} in XML Schema:
-     * a complex type whose only particle is a repeating {@code entry} with {@code key}/{@code value}.
+     * Detects the JAXB/CXF representation of {@code Map} in XML Schema: a complex type whose only particle is a
+     * repeating {@code entry} with {@code key}/{@code value}. Returns that {@code entry} element, or {@code null}.
      */
-    private static boolean isJaxbMapComplexType(XmlSchemaComplexType complexType, XmlSchema schema) {
+    private static XmlSchemaElement jaxbMapEntry(XmlSchemaComplexType complexType, XmlSchema schema) {
         XmlSchemaParticle particle = complexType.getParticle();
         if (!(particle instanceof XmlSchemaSequence sequence) || sequence.getItems().size() != 1) {
-            return false;
+            return null;
         }
         XmlSchemaSequenceMember only = sequence.getItems().get(0);
         if (!(only instanceof XmlSchemaElement entryElement)) {
-            return false;
+            return null;
         }
         XmlSchemaElement resolvedEntry = ComplexTypeResolver.resolveElementReference(entryElement);
         String entryName = entryElement.getName() != null ? entryElement.getName() : resolvedEntry.getName();
         if (!"entry".equals(entryName) || !isRepeating(entryElement)) {
-            return false;
+            return null;
         }
         XmlSchemaComplexType entryType = ComplexTypeResolver.resolve(resolvedEntry, schema);
         if (entryType == null) {
-            return false;
+            return null;
         }
         boolean hasKey = false;
         boolean hasValue = false;
         List<XmlSchemaElement> children = sequenceElements(entryType.getParticle());
         if (children.isEmpty()) {
-            return false;
+            return null;
         }
         for (XmlSchemaElement child : children) {
             String childName = child.getName();
@@ -431,10 +446,10 @@ public class ParticleVisitor {
             } else if ("value".equals(childName)) {
                 hasValue = true;
             } else {
-                return false;
+                return null;
             }
         }
-        return hasKey && hasValue;
+        return hasKey && hasValue ? entryElement : null;
     }
 
     private static List<XmlSchemaElement> sequenceElements(XmlSchemaParticle particle) {

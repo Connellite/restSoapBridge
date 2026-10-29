@@ -8,20 +8,19 @@ import io.github.connellite.model.WsdlEndpoint;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.binder.cache.CaffeineCacheMetrics;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.cxf.endpoint.Client;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Component;
 
 /**
- * Dynamic CXF clients, one per WSDL URL, WSDL port and endpoint address. Building a client downloads the WSDL and compiles JAXB classes,
- * so clients are cached; idle ones are evicted and, optionally, rebuilt in the background to pick up WSDL changes.
+ * SOAP ports, one per WSDL URL, WSDL port and endpoint address. Building one downloads and parses the WSDL, so ports
+ * are cached; idle ones are evicted and, optionally, rebuilt in the background to pick up WSDL changes.
  */
 @Slf4j
 @Component
 public class SoapClientPool implements DisposableBean {
 
-    private final LoadingCache<ClientKey, Client> clients;
+    private final LoadingCache<ClientKey, SoapPort> clients;
 
     public SoapClientPool(BridgeProperties bridgeProperties, SoapClientFactory clientFactory, ObjectProvider<MeterRegistry> meterRegistry) {
         BridgeProperties.ClientPool pool = bridgeProperties.getClientPool();
@@ -40,21 +39,11 @@ public class SoapClientPool implements DisposableBean {
         meterRegistry.ifAvailable(registry -> CaffeineCacheMetrics.monitor(registry, clients, "soap.clients"));
     }
 
-    public Client getClient(String wsdlUrl) {
-        return getClient(wsdlUrl, null);
-    }
-
     /**
+     * @param endpoint        WSDL service and port to call
      * @param endpointAddress configured address of the service, {@code null} for the (rebased) WSDL address
      */
-    public Client getClient(String wsdlUrl, String endpointAddress) {
-        return getClient(wsdlUrl, null, endpointAddress);
-    }
-
-    /**
-     * @param endpoint WSDL service and port to call, {@code null} for the one CXF picks
-     */
-    public Client getClient(String wsdlUrl, WsdlEndpoint endpoint, String endpointAddress) {
+    public SoapPort getPort(String wsdlUrl, WsdlEndpoint endpoint, String endpointAddress) {
         return clients.get(new ClientKey(wsdlUrl, endpoint, endpointAddress));
     }
 
@@ -68,7 +57,7 @@ public class SoapClientPool implements DisposableBean {
      * A client replaced by a background refresh may still serve in-flight calls, so it is left to GC;
      * evicted or invalidated clients are destroyed to release their conduits.
      */
-    private static void onRemoval(ClientKey key, Client client, RemovalCause cause) {
+    private static void onRemoval(ClientKey key, SoapPort client, RemovalCause cause) {
         if (client == null || key == null) {
             return;
         }
